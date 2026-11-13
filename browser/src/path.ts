@@ -1,0 +1,117 @@
+// Replaces node:path in the browser build. Keep the behavior consistent with
+// the Node build so that both builds handle paths the same way.
+const ABSOLUTE_PATH_REGEX = /^(?:\/|(?:[A-Za-z]:)?[/\\|])/;
+const RELATIVE_PATH_REGEX = /^\.?\.\//;
+const ALL_BACKSLASHES_REGEX = /\\/g;
+const ANY_SLASH_REGEX = /[/\\]/;
+const DRIVE_REGEX = /^[A-Za-z]:$/;
+const TRAILING_SLASHES_REGEX = /[/\\]+$/;
+
+export function isAbsolute(path: string): boolean {
+	return ABSOLUTE_PATH_REGEX.test(path);
+}
+
+export function isRelative(path: string): boolean {
+	return RELATIVE_PATH_REGEX.test(path);
+}
+
+export function normalize(path: string): string {
+	return path.replace(ALL_BACKSLASHES_REGEX, '/');
+}
+
+export function basename(path: string): string {
+	return path.replace(TRAILING_SLASHES_REGEX, '').split(ANY_SLASH_REGEX).pop() || '';
+}
+
+export function dirname(path: string): string {
+	const trimmed = path.replace(TRAILING_SLASHES_REGEX, '');
+	const match = /[/\\][^/\\]*$/.exec(trimmed);
+	if (match) {
+		const directory = trimmed.slice(0, -match[0].length);
+
+		// If `directory` is the empty string, we're at root.
+		return directory || '/';
+	}
+
+	if (trimmed === '') return path ? '/' : '.';
+	// A drive root like "C:/" keeps the drive as its directory.
+	if (path !== trimmed && DRIVE_REGEX.test(trimmed)) return trimmed;
+	return '.';
+}
+
+export function extname(path: string): string {
+	const base = basename(path);
+	if (base === '.' || base === '..') return '';
+	const index = base.lastIndexOf('.');
+	return index > 0 ? base.slice(index) : '';
+}
+
+export function join(...segments: string[]): string {
+	// An empty segment contributes nothing, so it must not turn the path into
+	// an absolute one by putting a slash in front of the next segment.
+	const joined = segments.filter(Boolean).join('/');
+	if (joined === '') return '.';
+	const absolute = ANY_SLASH_REGEX.test(joined[0]);
+	const normalized = normalizePathSegments(joined.split(ANY_SLASH_REGEX), absolute).join('/');
+	const result = (absolute ? '/' : '') + (normalized || (absolute ? '' : '.'));
+	// node:path keeps a trailing slash
+	return TRAILING_SLASHES_REGEX.test(joined) && !result.endsWith('/') ? result + '/' : result;
+}
+
+function normalizePathSegments(parts: string[], absolute: boolean): string[] {
+	const normalized: string[] = [];
+	// A drive like "C:" is the root of the path, so ".." cannot climb above it
+	const root = DRIVE_REGEX.test(parts[0]) ? 1 : 0;
+	for (const part of parts) {
+		if (part === '..') {
+			if (normalized.length > root && normalized[normalized.length - 1] !== '..') {
+				normalized.pop();
+			} else if (!absolute && root === 0) {
+				normalized.push('..');
+			}
+		} else if (part !== '.' && part !== '') {
+			normalized.push(part);
+		}
+	}
+	return normalized;
+}
+
+export function relative(from: string, to: string): string {
+	// "." and ".." segments are collapsed on both sides first, as node:path
+	// does, so that "/a/./b" and "/a/b" describe the same location.
+	const fromParts = normalizePathSegments(from.split(ANY_SLASH_REGEX), isAbsolute(from));
+	const toParts = normalizePathSegments(to.split(ANY_SLASH_REGEX), isAbsolute(to));
+
+	while (fromParts[0] && toParts[0] && fromParts[0] === toParts[0]) {
+		fromParts.shift();
+		toParts.shift();
+	}
+
+	while (fromParts.pop()) {
+		toParts.unshift('..');
+	}
+
+	return toParts.join('/');
+}
+
+export function resolve(...paths: string[]): string {
+	let parts: string[] = [];
+	let isAbsoluteResult = false;
+	for (const path of paths) {
+		if (isAbsolute(path)) {
+			parts = path.split(ANY_SLASH_REGEX);
+			isAbsoluteResult = true;
+		} else {
+			parts.push(...path.split(ANY_SLASH_REGEX));
+		}
+	}
+	const normalized = normalizePathSegments(parts, isAbsoluteResult).join('/');
+	if (!isAbsoluteResult) return normalized || '/';
+	// Windows absolute paths (e.g. "C:/path") must not get a leading "/" prepended.
+	// Unix absolute paths must start with "/".
+	return /^[A-Za-z]:/.test(normalized) ? normalized : '/' + normalized;
+}
+
+// Used for running the browser build locally in Vite
+export const win32 = {};
+export const posix = {};

@@ -1,31 +1,40 @@
 import MagicString, { SourceMap } from 'magic-string';
-import Module from '../Module';
-import {
+import type Module from '../Module';
+import type {
 	DecodedSourceMapOrMissing,
 	EmittedFile,
-	ExistingRawSourceMap,
+	LoggingFunctionWithPosition,
+	NormalizedInputOptions,
 	Plugin,
 	PluginContext,
 	RollupError,
-	RollupWarning,
 	SourceDescription,
+	SourceMapInput,
 	TransformModuleJSON,
 	TransformPluginContext,
-	TransformResult,
-	WarningHandler
+	TransformResult
 } from '../rollup/types';
 import { collapseSourcemap } from './collapseSourcemaps';
 import { decodedSourcemap } from './decodedSourcemap';
-import { augmentCodeLocation, errNoTransformMapOrAstWithoutCode } from './error';
+import { LOGLEVEL_WARN } from './logging';
+import {
+	augmentCodeLocation,
+	error,
+	logInvalidSetAssetSourceCall,
+	logNoTransformMapOrAstWithoutCode,
+	logPluginError,
+	warnDeprecation
+} from './logs';
+import { normalizeLog } from './options/options';
 import { getTrackedPluginCache } from './PluginCache';
-import { PluginDriver } from './PluginDriver';
-import { throwPluginError } from './pluginUtils';
+import type { PluginDriver } from './PluginDriver';
+import { URL_TRANSFORM } from './urls';
 
-export default function transform(
+export default async function transform(
 	source: SourceDescription,
 	module: Module,
 	pluginDriver: PluginDriver,
-	warn: WarningHandler
+	options: NormalizedInputOptions
 ): Promise<TransformModuleJSON> {
 	const id = module.id;
 	const sourcemapChain: DecodedSourceMapOrMissing[] = [];
@@ -37,8 +46,8 @@ export default function transform(
 	const emittedFiles: EmittedFile[] = [];
 	let customTransformCache = false;
 	const useCustomTransformCache = () => (customTransformCache = true);
-	let curPlugin: Plugin;
-	const curSource: string = source.code;
+	let pluginName = '';
+	let currentSource = source.code;
 
 	function transformReducer(
 		this: PluginContext,
@@ -47,16 +56,24 @@ export default function transform(
 		plugin: Plugin
 	): string {
 		let code: string;
-		let map: string | ExistingRawSourceMap | { mappings: '' } | null | undefined;
+		let map: SourceMapInput | undefined;
 		if (typeof result === 'string') {
 			code = result;
 		} else if (result && typeof result === 'object') {
 			module.updateOptions(result);
 			if (result.code == null) {
 				if (result.map || result.ast) {
-					warn(errNoTransformMapOrAstWithoutCode(plugin.name));
+					options.onLog(LOGLEVEL_WARN, logNoTransformMapOrAstWithoutCode(plugin.name));
 				}
 				return previousCode;
+			}
+			if (result.attributes) {
+				warnDeprecation(
+					'Returning attributes from the "transform" hook is forbidden.',
+					URL_TRANSFORM,
+					false,
+					options
+				);
 			}
 			({ code, map, ast } = result);
 		} else {
@@ -74,56 +91,59 @@ export default function transform(
 			);
 		}
 
+		currentSource = code;
+
 		return code;
 	}
 
-	return pluginDriver
-		.hookReduceArg0(
+	const getLogHandler =
+		(handler: LoggingFunctionWithPosition): LoggingFunctionWithPosition =>
+		(log, pos) => {
+			log = normalizeLog(log);
+			if (pos != null) augmentCodeLocation(log, pos, currentSource, id);
+			log.id = id;
+			log.hook = 'transform';
+			handler(log);
+		};
+
+	let code: string;
+
+	try {
+		code = await pluginDriver.hookReduceArg0(
 			'transform',
-			[curSource, id],
+			[
+				currentSource,
+				id,
+				{
+					attributes: module.info.attributes
+				}
+			],
 			transformReducer,
 			(pluginContext, plugin): TransformPluginContext => {
-				curPlugin = plugin;
+				pluginName = plugin.name;
 				return {
 					...pluginContext,
-					cache: customTransformCache
-						? pluginContext.cache
-						: getTrackedPluginCache(pluginContext.cache, useCustomTransformCache),
-					warn(warning: RollupWarning | string, pos?: number | { column: number; line: number }) {
-						if (typeof warning === 'string') warning = { message: warning } as RollupWarning;
-						if (pos) augmentCodeLocation(warning, pos, curSource, id);
-						warning.id = id;
-						warning.hook = 'transform';
-						pluginContext.warn(warning);
-					},
-					error(err: RollupError | string, pos?: number | { column: number; line: number }): never {
-						if (typeof err === 'string') err = { message: err };
-						if (pos) augmentCodeLocation(err, pos, curSource, id);
-						err.id = id;
-						err.hook = 'transform';
-						return pluginContext.error(err);
-					},
-					emitAsset(name: string, source?: string | Uint8Array) {
-						emittedFiles.push({ type: 'asset' as const, name, source });
-						return pluginContext.emitAsset(name, source);
-					},
-					emitChunk(id, options) {
-						emittedFiles.push({ type: 'chunk' as const, id, name: options && options.name });
-						return pluginContext.emitChunk(id, options);
-					},
-					emitFile(emittedFile: EmittedFile) {
-						emittedFiles.push(emittedFile);
-						return pluginDriver.emitFile(emittedFile);
-					},
 					addWatchFile(id: string) {
 						transformDependencies.push(id);
 						pluginContext.addWatchFile(id);
 					},
-					setAssetSource() {
-						return this.error({
-							code: 'INVALID_SETASSETSOURCE',
-							message: `setAssetSource cannot be called in transform for caching reasons. Use emitFile with a source, or call setAssetSource in another hook.`
-						});
+					cache: customTransformCache
+						? pluginContext.cache
+						: getTrackedPluginCache(pluginContext.cache, useCustomTransformCache),
+					debug: getLogHandler(pluginContext.debug),
+					emitFile(emittedFile: EmittedFile) {
+						emittedFiles.push(emittedFile);
+						return pluginDriver.emitFile(emittedFile);
+					},
+					error(
+						error_: RollupError | string,
+						pos?: number | { column: number; line: number }
+					): never {
+						if (typeof error_ === 'string') error_ = { message: error_ };
+						if (pos != null) augmentCodeLocation(error_, pos, currentSource, id);
+						error_.id = id;
+						error_.hook = 'transform';
+						return pluginContext.error(error_);
 					},
 					getCombinedSourcemap() {
 						const combinedMap = collapseSourcemap(
@@ -131,11 +151,11 @@ export default function transform(
 							originalCode,
 							originalSourcemap,
 							sourcemapChain,
-							warn
+							options.onLog
 						);
 						if (!combinedMap) {
 							const magicString = new MagicString(originalCode);
-							return magicString.generateMap({ includeContent: true, hires: true, source: id });
+							return magicString.generateMap({ hires: true, includeContent: true, source: id });
 						}
 						if (originalSourcemap !== combinedMap) {
 							originalSourcemap = combinedMap;
@@ -143,29 +163,35 @@ export default function transform(
 						}
 						return new SourceMap({
 							...combinedMap,
-							file: null as any,
 							sourcesContent: combinedMap.sourcesContent!
 						});
-					}
+					},
+					info: getLogHandler(pluginContext.info),
+					setAssetSource() {
+						return this.error(logInvalidSetAssetSourceCall());
+					},
+					warn: getLogHandler(pluginContext.warn)
 				};
 			}
-		)
-		.catch(err => throwPluginError(err, curPlugin.name, { hook: 'transform', id }))
-		.then(code => {
-			if (!customTransformCache) {
-				// files emitted by a transform hook need to be emitted again if the hook is skipped
-				if (emittedFiles.length) module.transformFiles = emittedFiles;
-			}
+		);
+	} catch (error_: any) {
+		return error(logPluginError(error_, pluginName, { hook: 'transform', id }));
+	}
 
-			return {
-				ast,
-				code,
-				customTransformCache,
-				meta: module.info.meta,
-				originalCode,
-				originalSourcemap,
-				sourcemapChain,
-				transformDependencies
-			};
-		});
+	if (
+		!customTransformCache && // files emitted by a transform hook need to be emitted again if the hook is skipped
+		emittedFiles.length > 0
+	)
+		module.transformFiles = emittedFiles;
+
+	return {
+		ast,
+		code,
+		customTransformCache,
+		originalCode,
+		originalSourcemap,
+		safeVariableNames: null,
+		sourcemapChain,
+		transformDependencies
+	};
 }

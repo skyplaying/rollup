@@ -1,9 +1,9 @@
-System.register('myBundle', [], function (exports) {
+System.register('myBundle', [], (function (exports) {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
-			exports('default', x);
+			exports("default", x);
 
 			var augment;
 			augment = y => y.augmented = true;
@@ -11,6 +11,6 @@ System.register('myBundle', [], function (exports) {
 			function x () {}
 			augment( x );
 
-		}
+		})
 	};
-});
+}));

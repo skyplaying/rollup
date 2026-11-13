@@ -1,10 +1,11 @@
-import { Bundle as MagicStringBundle } from 'magic-string';
-import { NormalizedOutputOptions } from '../rollup/types';
-import { FinaliserOptions } from './index';
+import type { Bundle as MagicStringBundle } from 'magic-string';
+import type { NormalizedOutputOptions } from '../rollup/types';
+import type { FinaliserOptions } from './index';
 import getCompleteAmdId from './shared/getCompleteAmdId';
 import { getExportBlock, getNamespaceMarkers } from './shared/getExportBlock';
 import getInteropBlock from './shared/getInteropBlock';
-import removeExtensionFromRelativeAmdId from './shared/removeExtensionFromRelativeAmdId';
+import throwOnPhase from './shared/throwOnPhase';
+import updateExtensionForRelativeAmdId from './shared/updateExtensionForRelativeAmdId';
 import warnOnBuiltins from './shared/warnOnBuiltins';
 
 export default function amd(
@@ -13,69 +14,68 @@ export default function amd(
 		accessedGlobals,
 		dependencies,
 		exports,
+		hasDefaultExport,
 		hasExports,
 		id,
-		indentString: t,
+		indent: t,
 		intro,
 		isEntryFacade,
 		isModuleFacade,
 		namedExportsMode,
+		log,
 		outro,
-		varOrConst,
-		warn
+		snippets
 	}: FinaliserOptions,
 	{
 		amd,
-		compact,
 		esModule,
 		externalLiveBindings,
 		freeze,
+		generatedCode: { symbols },
 		interop,
-		namespaceToStringTag,
+		reexportProtoFromExternal,
 		strict
 	}: NormalizedOutputOptions
-) {
-	warnOnBuiltins(warn, dependencies);
-	const deps = dependencies.map(m => `'${removeExtensionFromRelativeAmdId(m.id)}'`);
-	const args = dependencies.map(m => m.name);
-	const n = compact ? '' : '\n';
-	const s = compact ? '' : ';';
-	const _ = compact ? '' : ' ';
+): void {
+	warnOnBuiltins(log, dependencies);
+	throwOnPhase('amd', id, dependencies);
+	const deps = dependencies.map(
+		m => `'${updateExtensionForRelativeAmdId(m.importPath, amd.forceJsExtensionForImports)}'`
+	);
+	const parameters = dependencies.map(m => m.name);
+	const { n, getNonArrowFunctionIntro, _ } = snippets;
 
-	if (namedExportsMode && hasExports) {
-		args.unshift(`exports`);
+	if (hasExports && (namedExportsMode || exports[0]?.local === 'exports.default')) {
+		parameters.unshift(`exports`);
 		deps.unshift(`'exports'`);
 	}
 
 	if (accessedGlobals.has('require')) {
-		args.unshift('require');
+		parameters.unshift('require');
 		deps.unshift(`'require'`);
 	}
 
 	if (accessedGlobals.has('module')) {
-		args.unshift('module');
+		parameters.unshift('module');
 		deps.unshift(`'module'`);
 	}
 
 	const completeAmdId = getCompleteAmdId(amd, id);
-	const params =
+	const defineParameters =
 		(completeAmdId ? `'${completeAmdId}',${_}` : ``) +
-		(deps.length ? `[${deps.join(`,${_}`)}],${_}` : ``);
+		(deps.length > 0 ? `[${deps.join(`,${_}`)}],${_}` : ``);
 	const useStrict = strict ? `${_}'use strict';` : '';
 
 	magicString.prepend(
 		`${intro}${getInteropBlock(
 			dependencies,
-			varOrConst,
 			interop,
 			externalLiveBindings,
 			freeze,
-			namespaceToStringTag,
+			symbols,
 			accessedGlobals,
-			_,
-			n,
-			s,
-			t
+			t,
+			snippets
 		)}`
 	);
 
@@ -84,23 +84,30 @@ export default function amd(
 		dependencies,
 		namedExportsMode,
 		interop,
-		compact,
+		snippets,
 		t,
-		externalLiveBindings
+		externalLiveBindings,
+		reexportProtoFromExternal
 	);
 	let namespaceMarkers = getNamespaceMarkers(
 		namedExportsMode && hasExports,
-		isEntryFacade && esModule,
-		isModuleFacade && namespaceToStringTag,
-		_,
-		n
+		isEntryFacade && (esModule === true || (esModule === 'if-default-prop' && hasDefaultExport)),
+		isModuleFacade && symbols,
+		snippets
 	);
 	if (namespaceMarkers) {
 		namespaceMarkers = n + n + namespaceMarkers;
 	}
-	magicString.append(`${exportBlock}${namespaceMarkers}${outro}`);
-	return magicString
+	magicString
+		.append(`${exportBlock}${namespaceMarkers}${outro}`)
 		.indent(t)
-		.prepend(`${amd.define}(${params}function${_}(${args.join(`,${_}`)})${_}{${useStrict}${n}${n}`)
-		.append(`${n}${n}});`);
+		// factory function should be wrapped by parentheses to avoid lazy parsing,
+		// cf. https://v8.dev/blog/preparser#pife
+		.prepend(
+			`${amd.define}(${defineParameters}(${getNonArrowFunctionIntro(parameters, {
+				isAsync: false,
+				name: null
+			})}{${useStrict}${n}${n}`
+		)
+		.append(`${n}${n}}));`);
 }

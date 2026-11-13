@@ -1,8 +1,9 @@
-module.exports = {
+module.exports = defineTest({
 	description: 'synthetic named exports',
 	options: {
 		plugins: [
 			{
+				name: 'test',
 				resolveId(id) {
 					if (id.endsWith('dep1.js')) {
 						return id;
@@ -15,7 +16,7 @@ module.exports = {
 							code: `
 const d = {
   fn: 42,
-  hello: 'hola'
+  unused: 'tree-shaken',
 };
 export default d;`,
 							syntheticNamedExports: true
@@ -26,4 +27,4 @@ export default d;`,
 			}
 		]
 	}
-};
+});

@@ -1,39 +1,41 @@
 #!/usr/bin/env node
 
-const { readdirSync, copydirSync, copyFileSync, rimrafSync } = require('sander');
-const { resolve, join } = require('path');
+import fs from 'fs-extra';
+import { readdirSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const basePath = resolve(__dirname, '../test');
+const basePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../test');
 
-const formPath = join(basePath, 'form/samples');
-const formDirsToHandle = readdirSync(formPath);
-for (const dir of formDirsToHandle) {
-	const testPath = join(formPath, dir);
+const formPath = path.join(basePath, 'form/samples');
+const formDirectoriesToHandle = readdirSync(formPath);
+for (const directory of formDirectoriesToHandle) {
+	const testPath = path.join(formPath, directory);
 	const testFiles = readdirSync(testPath);
 	if (!testFiles.includes('_config.js')) {
-		formDirsToHandle.push(...testFiles.map(filename => join(dir, filename)));
+		formDirectoriesToHandle.push(...testFiles.map(filename => path.join(directory, filename)));
 	} else if (testFiles.includes('_actual')) {
-		const expectedPath = join(testPath, '_expected');
-		rimrafSync(expectedPath);
-		copydirSync(join(testPath, '_actual')).to(expectedPath);
+		const expectedPath = path.join(testPath, '_expected');
+		fs.removeSync(expectedPath);
+		fs.copySync(path.join(testPath, '_actual'), expectedPath);
 	} else if (testFiles.includes('_actual.js')) {
-		copyFileSync(join(testPath, '_actual.js')).to(join(testPath, '_expected.js'));
+		fs.copySync(path.join(testPath, '_actual.js'), path.join(testPath, '_expected.js'));
 	} else {
 		throw new Error(`Could not find test output in ${testPath}`);
 	}
 }
 
-const chunkingPath = join(basePath, 'chunking-form/samples');
-const chunkingDirsToHandle = readdirSync(chunkingPath);
-for (const dir of chunkingDirsToHandle) {
-	const testPath = join(chunkingPath, dir);
+const chunkingPath = path.join(basePath, 'chunking-form/samples');
+const chunkingDirectoriesToHandle = readdirSync(chunkingPath);
+for (const directory of chunkingDirectoriesToHandle) {
+	const testPath = path.join(chunkingPath, directory);
 	const testFiles = readdirSync(testPath);
 	if (!testFiles.includes('_config.js')) {
-		chunkingDirsToHandle.push(...testFiles.map(filename => join(dir, filename)));
+		chunkingDirectoriesToHandle.push(...testFiles.map(filename => path.join(directory, filename)));
 	} else if (testFiles.includes('_actual')) {
-		const expectedPath = join(testPath, '_expected');
-		rimrafSync(expectedPath);
-		copydirSync(join(testPath, '_actual')).to(expectedPath);
+		const expectedPath = path.join(testPath, '_expected');
+		fs.removeSync(expectedPath);
+		fs.copySync(path.join(testPath, '_actual'), expectedPath);
 	} else {
 		throw new Error(`Could not find test output in ${testPath}`);
 	}

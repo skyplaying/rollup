@@ -1,20 +1,19 @@
-import { CustomPluginOptions, Plugin, PluginContext, ResolvedId } from '../rollup/types';
-import { BLANK } from './blank';
-import { PluginDriver, ReplaceContext } from './PluginDriver';
+import type { ModuleLoaderResolveId } from '../ModuleLoader';
+import type { CustomPluginOptions, Plugin, PluginContext, ResolveIdResult } from '../rollup/types';
+import type { PluginDriver, ReplaceContext } from './PluginDriver';
+import { BLANK, EMPTY_OBJECT } from './blank';
 
 export function resolveIdViaPlugins(
 	source: string,
 	importer: string | undefined,
 	pluginDriver: PluginDriver,
-	moduleLoaderResolveId: (
-		source: string,
-		importer: string | undefined,
-		customOptions: CustomPluginOptions | undefined,
-		skip: { importer: string | undefined; plugin: Plugin; source: string }[] | null
-	) => Promise<ResolvedId | null>,
-	skip: { importer: string | undefined; plugin: Plugin; source: string }[] | null,
-	customOptions: CustomPluginOptions | undefined
-) {
+	moduleLoaderResolveId: ModuleLoaderResolveId,
+	skip: readonly { importer: string | undefined; plugin: Plugin; source: string }[] | null,
+	customOptions: CustomPluginOptions | undefined,
+	isEntry: boolean,
+	attributes: Record<string, string>,
+	importerAttributes: Record<string, string> | undefined
+): Promise<[NonNullable<ResolveIdResult>, Plugin] | null> {
 	let skipped: Set<Plugin> | null = null;
 	let replaceContext: ReplaceContext | null = null;
 	if (skip) {
@@ -26,19 +25,41 @@ export function resolveIdViaPlugins(
 		}
 		replaceContext = (pluginContext, plugin): PluginContext => ({
 			...pluginContext,
-			resolve: (source, importer, { custom, skipSelf } = BLANK) => {
+			resolve: (
+				source,
+				importer,
+				{ attributes, custom, isEntry, skipSelf, importerAttributes } = BLANK
+			) => {
+				skipSelf ??= true;
+				if (
+					skipSelf &&
+					skip.findIndex(skippedCall => {
+						return (
+							skippedCall.plugin === plugin &&
+							skippedCall.source === source &&
+							skippedCall.importer === importer
+						);
+					}) !== -1
+				) {
+					// This means that the plugin recursively called itself
+					// Thus returning Promise.resolve(null) in purpose of fallback to default behavior of `resolveId` plugin hook.
+					return Promise.resolve(null);
+				}
 				return moduleLoaderResolveId(
 					source,
 					importer,
 					custom,
+					isEntry,
+					attributes || EMPTY_OBJECT,
+					importerAttributes,
 					skipSelf ? [...skip, { importer, plugin, source }] : skip
 				);
 			}
 		});
 	}
-	return pluginDriver.hookFirst(
+	return pluginDriver.hookFirstAndGetPlugin(
 		'resolveId',
-		[source, importer, { custom: customOptions }],
+		[source, importer, { attributes, custom: customOptions, importerAttributes, isEntry }],
 		replaceContext,
 		skipped
 	);

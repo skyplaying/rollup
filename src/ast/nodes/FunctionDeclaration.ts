@@ -1,24 +1,30 @@
-import ChildScope from '../scopes/ChildScope';
-import { IdentifierWithVariable } from './Identifier';
-import * as NodeType from './NodeType';
+import type ChildScope from '../scopes/ChildScope';
+import Identifier, { type IdentifierWithVariable } from './Identifier';
+import type * as NodeType from './NodeType';
 import FunctionNode from './shared/FunctionNode';
-import { GenericEsTreeNode } from './shared/Node';
+import type { GenericEsTreeNode } from './shared/Node';
 
 export default class FunctionDeclaration extends FunctionNode {
-	type!: NodeType.tFunctionDeclaration;
+	declare type: NodeType.tFunctionDeclaration;
 
-	initialise() {
+	initialise(): void {
 		super.initialise();
 		if (this.id !== null) {
 			this.id.variable.isId = true;
 		}
 	}
 
-	parseNode(esTreeNode: GenericEsTreeNode) {
+	protected onlyFunctionCallUsed(): boolean {
+		// call super.onlyFunctionCallUsed for export default anonymous function
+		return this.id?.variable.getOnlyFunctionCallUsed() ?? super.onlyFunctionCallUsed();
+	}
+
+	parseNode(esTreeNode: GenericEsTreeNode): this {
 		if (esTreeNode.id !== null) {
-			this.id = new this.context.nodeConstructors.Identifier(esTreeNode.id, this, this.scope
-				.parent as ChildScope) as IdentifierWithVariable;
+			this.id = new Identifier(this, this.scope.parent as ChildScope).parseNode(
+				esTreeNode.id
+			) as IdentifierWithVariable;
 		}
-		super.parseNode(esTreeNode);
+		return super.parseNode(esTreeNode);
 	}
 }

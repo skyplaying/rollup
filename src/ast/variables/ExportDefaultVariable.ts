@@ -1,24 +1,30 @@
-import { AstContext } from '../../Module';
+import type { AstContext } from '../../Module';
 import ClassDeclaration from '../nodes/ClassDeclaration';
-import ExportDefaultDeclaration from '../nodes/ExportDefaultDeclaration';
+import type ExportDefaultDeclaration from '../nodes/ExportDefaultDeclaration';
 import FunctionDeclaration from '../nodes/FunctionDeclaration';
-import Identifier, { IdentifierWithVariable } from '../nodes/Identifier';
+import Identifier, { type IdentifierWithVariable } from '../nodes/Identifier';
+import type IdentifierBase from '../nodes/shared/IdentifierBase';
+import type { NodeBase } from '../nodes/shared/Node';
+import { EMPTY_PATH } from '../utils/PathTracker';
 import LocalVariable from './LocalVariable';
 import UndefinedVariable from './UndefinedVariable';
-import Variable from './Variable';
+import type Variable from './Variable';
 
 export default class ExportDefaultVariable extends LocalVariable {
 	hasId = false;
 
-	private originalId: IdentifierWithVariable | null = null;
+	private readonly originalId: IdentifierWithVariable | null = null;
 	private originalVariable: Variable | null = null;
 
-	constructor(
-		name: string,
-		exportDefaultDeclaration: ExportDefaultDeclaration,
-		context: AstContext
-	) {
-		super(name, exportDefaultDeclaration, exportDefaultDeclaration.declaration, context);
+	constructor(exportDefaultDeclaration: ExportDefaultDeclaration, context: AstContext) {
+		super(
+			'default',
+			exportDefaultDeclaration,
+			exportDefaultDeclaration.declaration,
+			EMPTY_PATH,
+			context,
+			'other'
+		);
 		const declaration = exportDefaultDeclaration.declaration;
 		if (
 			(declaration instanceof FunctionDeclaration || declaration instanceof ClassDeclaration) &&
@@ -31,9 +37,27 @@ export default class ExportDefaultVariable extends LocalVariable {
 		}
 	}
 
-	addReference(identifier: Identifier) {
+	addReference(identifier: IdentifierBase): void {
 		if (!this.hasId) {
 			this.name = identifier.name;
+		}
+	}
+
+	addUsedPlace(usedPlace: NodeBase): void {
+		const original = this.getOriginalVariable();
+		if (original === this) {
+			super.addUsedPlace(usedPlace);
+		} else {
+			original.addUsedPlace(usedPlace);
+		}
+	}
+
+	forbidName(name: string) {
+		const original = this.getOriginalVariable();
+		if (original === this) {
+			super.forbidName(name);
+		} else {
+			original.forbidName(name);
 		}
 	}
 
@@ -43,17 +67,14 @@ export default class ExportDefaultVariable extends LocalVariable {
 
 	getBaseVariableName(): string {
 		const original = this.getOriginalVariable();
-		if (original === this) {
-			return super.getBaseVariableName();
-		} else {
-			return original.getBaseVariableName();
-		}
+		return original === this ? super.getBaseVariableName() : original.getBaseVariableName();
 	}
 
 	getDirectOriginalVariable(): Variable | null {
 		return this.originalId &&
 			(this.hasId ||
 				!(
+					this.originalId.isPossibleTDZ() ||
 					this.originalId.variable.isReassigned ||
 					this.originalId.variable instanceof UndefinedVariable ||
 					// this avoids a circular dependency
@@ -63,17 +84,33 @@ export default class ExportDefaultVariable extends LocalVariable {
 			: null;
 	}
 
-	getName() {
-		const original = this.getOriginalVariable();
-		if (original === this) {
-			return super.getName();
-		} else {
-			return original.getName();
+	/**
+	 * Returns the namespace if this default export is just a re-export of a
+	 * namespace import. Namespace variables can neither be reassigned nor be
+	 * accessed in their TDZ, so this is safe to call while binding.
+	 */
+	getOriginalNamespaceVariable(): Variable | null {
+		// eslint-disable-next-line @typescript-eslint/no-this-alias
+		let current: Variable | undefined = this;
+		const checkedVariables = new Set<Variable>();
+		while (current instanceof ExportDefaultVariable && !checkedVariables.has(current)) {
+			checkedVariables.add(current);
+			if (current.hasId || !current.originalId) return null;
+			current = current.originalId.variable as Variable | undefined;
 		}
+		return current?.isNamespace ? current : null;
+	}
+
+	getName(getPropertyAccess: (name: string) => string): string {
+		const original = this.getOriginalVariable();
+		return original === this
+			? super.getName(getPropertyAccess)
+			: original.getName(getPropertyAccess);
 	}
 
 	getOriginalVariable(): Variable {
 		if (this.originalVariable) return this.originalVariable;
+		// eslint-disable-next-line @typescript-eslint/no-this-alias
 		let original: Variable | null = this;
 		let currentVariable: Variable;
 		const checkedVariables = new Set<Variable>();

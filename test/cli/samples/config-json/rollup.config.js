@@ -1,12 +1,10 @@
 import replace from '@rollup/plugin-replace';
-import pkg from './package.json';
+import pkg from './package.json' with { type: 'json' };
 
 module.exports = {
 	input: 'main.js',
 	output: {
 		format: 'cjs'
 	},
-	plugins: [
-		replace( { preventAssignment: true, '__VERSION__': pkg.version } )
-	]
+	plugins: [replace({ preventAssignment: true, __VERSION__: pkg.version })]
 };

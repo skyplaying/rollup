@@ -1,48 +1,23 @@
-import { version as rollupVersion } from 'package.json';
-import Graph from '../Graph';
-import {
+import pkg from '../../package.json' with { type: 'json' };
+import type Graph from '../Graph';
+import type {
 	NormalizedInputOptions,
 	Plugin,
 	PluginCache,
 	PluginContext,
-	RollupWarning,
 	SerializablePluginCache
 } from '../rollup/types';
-import { BLANK } from './blank';
-import { BuildPhase } from './buildPhase';
-import { errInvalidRollupPhaseForAddWatchFile, warnDeprecation } from './error';
-import { FileEmitter } from './FileEmitter';
+import { BLANK, EMPTY_OBJECT } from './blank';
+import type { FileEmitter } from './FileEmitter';
+import { LOGLEVEL_DEBUG, LOGLEVEL_INFO, LOGLEVEL_WARN } from './logging';
+import { getLogHandler } from './logHandler';
+import { error, logPluginError } from './logs';
+import { normalizeLog } from './options/options';
+import { parseAst } from './parseAst';
 import { createPluginCache, getCacheForUncacheablePlugin, NO_CACHE } from './PluginCache';
-import {
-	ANONYMOUS_OUTPUT_PLUGIN_PREFIX,
-	ANONYMOUS_PLUGIN_PREFIX,
-	throwPluginError
-} from './pluginUtils';
+import { ANONYMOUS_OUTPUT_PLUGIN_PREFIX, ANONYMOUS_PLUGIN_PREFIX } from './pluginNames';
 
-function getDeprecatedContextHandler<H extends Function>(
-	handler: H,
-	handlerName: string,
-	newHandlerName: string,
-	pluginName: string,
-	activeDeprecation: boolean,
-	options: NormalizedInputOptions
-): H {
-	let deprecationWarningShown = false;
-	return (((...args: any[]) => {
-		if (!deprecationWarningShown) {
-			deprecationWarningShown = true;
-			warnDeprecation(
-				{
-					message: `The "this.${handlerName}" plugin context function used by plugin ${pluginName} is deprecated. The "this.${newHandlerName}" plugin context function should be used instead.`,
-					plugin: pluginName
-				},
-				activeDeprecation,
-				options
-			);
-		}
-		return handler(...args);
-	}) as unknown) as H;
-}
+const rollupVersion = pkg.version;
 
 export function getPluginContext(
 	plugin: Plugin,
@@ -52,6 +27,7 @@ export function getPluginContext(
 	fileEmitter: FileEmitter,
 	existingPluginNames: Set<string>
 ): PluginContext {
+	const { logLevel, onLog } = options;
 	let cacheable = true;
 	if (typeof plugin.cacheKey !== 'string') {
 		if (
@@ -77,113 +53,47 @@ export function getPluginContext(
 		cacheInstance = getCacheForUncacheablePlugin(plugin.name);
 	}
 
-	const context: PluginContext = {
+	return {
 		addWatchFile(id) {
-			if (graph.phase >= BuildPhase.GENERATE) {
-				return this.error(errInvalidRollupPhaseForAddWatchFile());
-			}
 			graph.watchFiles[id] = true;
 		},
 		cache: cacheInstance,
-		emitAsset: getDeprecatedContextHandler(
-			(name: string, source?: string | Uint8Array) =>
-				fileEmitter.emitFile({ type: 'asset', name, source }),
-			'emitAsset',
-			'emitFile',
-			plugin.name,
-			true,
-			options
-		),
-		emitChunk: getDeprecatedContextHandler(
-			(id: string, options?: { name?: string }) =>
-				fileEmitter.emitFile({ type: 'chunk', id, name: options && options.name }),
-			'emitChunk',
-			'emitFile',
-			plugin.name,
-			true,
-			options
-		),
+		debug: getLogHandler(LOGLEVEL_DEBUG, 'PLUGIN_LOG', onLog, plugin.name, logLevel),
 		emitFile: fileEmitter.emitFile.bind(fileEmitter),
-		error(err): never {
-			return throwPluginError(err, plugin.name);
+		error(error_): never {
+			return error(logPluginError(normalizeLog(error_), plugin.name));
 		},
-		getAssetFileName: getDeprecatedContextHandler(
-			fileEmitter.getFileName,
-			'getAssetFileName',
-			'getFileName',
-			plugin.name,
-			true,
-			options
-		),
-		getChunkFileName: getDeprecatedContextHandler(
-			fileEmitter.getFileName,
-			'getChunkFileName',
-			'getFileName',
-			plugin.name,
-			true,
-			options
-		),
+		fs: options.fs,
 		getFileName: fileEmitter.getFileName,
 		getModuleIds: () => graph.modulesById.keys(),
 		getModuleInfo: graph.getModuleInfo,
 		getWatchFiles: () => Object.keys(graph.watchFiles),
-		isExternal: getDeprecatedContextHandler(
-			(id: string, parentId: string | undefined, isResolved = false) =>
-				options.external(id, parentId, isResolved),
-			'isExternal',
-			'resolve',
-			plugin.name,
-			true,
-			options
-		),
+		info: getLogHandler(LOGLEVEL_INFO, 'PLUGIN_LOG', onLog, plugin.name, logLevel),
+		load(resolvedId) {
+			return graph.moduleLoader.preloadModule(resolvedId);
+		},
 		meta: {
 			rollupVersion,
 			watchMode: graph.watchMode
 		},
-		get moduleIds() {
-			function* wrappedModuleIds() {
-				warnDeprecation(
-					{
-						message: `Accessing "this.moduleIds" on the plugin context by plugin ${plugin.name} is deprecated. The "this.getModuleIds" plugin context function should be used instead.`,
-						plugin: plugin.name
-					},
-					false,
-					options
-				);
-				yield* moduleIds;
-			}
-
-				const moduleIds = graph.modulesById.keys();
-				return wrappedModuleIds();
-			},
-			parse: graph.contextParse.bind(graph),
-			resolve(source, importer, { custom, skipSelf } = BLANK) {
-				return graph.moduleLoader.resolveId(
-					source,
-					importer,
-					custom,
-					skipSelf ? [{ importer, plugin, source }] : null
-				);
-			},
-			resolveId: getDeprecatedContextHandler(
-				(source: string, importer: string | undefined) =>
-					graph.moduleLoader
-						.resolveId(source, importer, BLANK)
-						.then(resolveId => resolveId && resolveId.id),
-				'resolveId',
-				'resolve',
-				plugin.name,
-				true,
-				options
-			),
-			setAssetSource: fileEmitter.setAssetSource,
-			warn(warning) {
-				if (typeof warning === 'string') warning = { message: warning } as RollupWarning;
-				if (warning.code) warning.pluginCode = warning.code;
-				warning.code = 'PLUGIN_WARNING';
-				warning.plugin = plugin.name;
-				options.onwarn(warning);
-			}
-		};
-		return context;
+		parse: parseAst,
+		resolve(
+			source,
+			importer,
+			{ attributes, custom, isEntry, skipSelf, importerAttributes } = BLANK
+		) {
+			skipSelf ??= true;
+			return graph.moduleLoader.resolveId(
+				source,
+				importer,
+				custom,
+				isEntry,
+				attributes || EMPTY_OBJECT,
+				importerAttributes,
+				skipSelf ? [{ importer, plugin, source }] : null
+			);
+		},
+		setAssetSource: fileEmitter.setAssetSource,
+		warn: getLogHandler(LOGLEVEL_WARN, 'PLUGIN_WARNING', onLog, plugin.name, logLevel)
+	};
 }

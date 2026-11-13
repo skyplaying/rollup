@@ -1,5 +1,5 @@
-define(['./generated-dep'], function (dep) { 'use strict';
+define(['./main1-alias'], (function (main1Alias_js) { 'use strict';
 
-	console.log(dep.name);
+	console.log(main1Alias_js.name);
 
-});
+}));

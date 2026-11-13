@@ -1,7 +1,7 @@
-System.register('iife', [], function (exports) {
+System.register('iife', [], (function (exports) {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
 			var self = /*#__PURE__*/Object.freeze({
 				__proto__: null,
@@ -10,8 +10,8 @@ System.register('iife', [], function (exports) {
 
 			console.log(Object.keys(self));
 
-			var p = exports('p', 5);
+			var p = exports("p", 5);
 
-		}
+		})
 	};
-});
+}));

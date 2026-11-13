@@ -1,37 +1,150 @@
-import { ObjectPath } from '../../utils/PathTracker';
+/* eslint sort-keys: "off" */
+
+import { doNothing } from '../../../utils/doNothing';
+import type { HasEffectsContext } from '../../ExecutionContext';
+import type { NodeInteractionCalled } from '../../NodeInteractions';
+import {
+	INTERACTION_CALLED,
+	NODE_INTERACTION_UNKNOWN_ACCESS,
+	NODE_INTERACTION_UNKNOWN_ASSIGNMENT
+} from '../../NodeInteractions';
+import { isObjectExpressionNode, isPropertyNode } from '../../utils/identifyNode';
+import type { ObjectPath, WellKnownSymbol } from '../../utils/PathTracker';
+import {
+	EMPTY_PATH,
+	SHARED_RECURSION_TRACKER,
+	SymbolAsyncDispose,
+	SymbolDispose,
+	SymbolHasInstance,
+	SymbolToStringTag,
+	UNKNOWN_NON_ACCESSOR_PATH,
+	UNKNOWN_PATH,
+	UnknownWellKnown
+} from '../../utils/PathTracker';
+import ArrayExpression from '../ArrayExpression';
+import type { LiteralValueOrUnknown } from './Expression';
+import { ExpressionEntity, UnknownValue } from './Expression';
 
 const ValueProperties = Symbol('Value Properties');
 
 interface ValueDescription {
-	pure: boolean;
+	deoptimizeArgumentsOnCall(interaction: NodeInteractionCalled): void;
+	getLiteralValue(): LiteralValueOrUnknown;
+	hasEffectsWhenCalled(interaction: NodeInteractionCalled, context: HasEffectsContext): boolean;
 }
 
 interface GlobalDescription {
+	[pathKey: string]: GlobalDescription | null;
 	[ValueProperties]: ValueDescription;
-	[pathKey: string]: GlobalDescription;
+	__proto__: null;
 }
 
-const PURE: ValueDescription = { pure: true };
-const IMPURE: ValueDescription = { pure: false };
+const getUnknownValue = (): LiteralValueOrUnknown => UnknownValue;
+const returnFalse = () => false;
+const returnTrue = () => true;
+
+const getWellKnownSymbol = (symbol: WellKnownSymbol) => ({
+	__proto__: null,
+	[ValueProperties]: {
+		deoptimizeArgumentsOnCall: doNothing,
+		getLiteralValue: () => symbol,
+		hasEffectsWhenCalled: returnTrue
+	}
+});
+
+const PURE: ValueDescription = {
+	deoptimizeArgumentsOnCall: doNothing,
+	getLiteralValue: getUnknownValue,
+	hasEffectsWhenCalled: returnFalse
+};
+
+const IMPURE: ValueDescription = {
+	deoptimizeArgumentsOnCall: doNothing,
+	getLiteralValue: getUnknownValue,
+	hasEffectsWhenCalled: returnTrue
+};
+
+const PURE_WITH_ARRAY: ValueDescription = {
+	deoptimizeArgumentsOnCall: doNothing,
+	getLiteralValue: getUnknownValue,
+	hasEffectsWhenCalled({ args }) {
+		return args.length > 1 && !(args[1] instanceof ArrayExpression);
+	}
+};
+
+const PURE_WITH_ARRAY_OR_LENGTH: ValueDescription = {
+	deoptimizeArgumentsOnCall: doNothing,
+	getLiteralValue: getUnknownValue,
+	hasEffectsWhenCalled({ args }) {
+		const [_thisArgument, firstArgument] = args;
+		return (
+			firstArgument !== undefined &&
+			!(firstArgument instanceof ArrayExpression) &&
+			typeof firstArgument.getLiteralValueAtPath(EMPTY_PATH, SHARED_RECURSION_TRACKER, {
+				deoptimizeCache: doNothing
+			}) !== 'number'
+		);
+	}
+};
+
+const GETTER_ACCESS: ValueDescription = {
+	deoptimizeArgumentsOnCall: doNothing,
+	getLiteralValue: getUnknownValue,
+	hasEffectsWhenCalled({ args }, context) {
+		const [_thisArgument, firstArgument] = args;
+		return (
+			!(firstArgument instanceof ExpressionEntity) ||
+			firstArgument.hasEffectsOnInteractionAtPath(
+				UNKNOWN_PATH,
+				NODE_INTERACTION_UNKNOWN_ACCESS,
+				context
+			)
+		);
+	}
+};
 
 // We use shortened variables to reduce file size here
 /* OBJECT */
 const O: GlobalDescription = {
-	// @ts-ignore
 	__proto__: null,
 	[ValueProperties]: IMPURE
 };
 
 /* PURE FUNCTION */
 const PF: GlobalDescription = {
-	// @ts-ignore
 	__proto__: null,
 	[ValueProperties]: PURE
 };
 
+/* PURE FUNCTION IF FIRST ARG DOES NOT CONTAIN A GETTER */
+const PF_NO_GETTER: GlobalDescription = {
+	__proto__: null,
+	[ValueProperties]: GETTER_ACCESS
+};
+
+/* FUNCTION THAT MUTATES FIRST ARG WITHOUT TRIGGERING ACCESSORS */
+const MUTATES_ARG_WITHOUT_ACCESSOR: GlobalDescription = {
+	__proto__: null,
+	[ValueProperties]: {
+		deoptimizeArgumentsOnCall({ args: [, firstArgument] }: NodeInteractionCalled) {
+			firstArgument?.deoptimizePath(UNKNOWN_PATH);
+		},
+		getLiteralValue: getUnknownValue,
+		hasEffectsWhenCalled({ args }, context) {
+			return (
+				args.length <= 1 ||
+				args[1].hasEffectsOnInteractionAtPath(
+					UNKNOWN_NON_ACCESSOR_PATH,
+					NODE_INTERACTION_UNKNOWN_ASSIGNMENT,
+					context
+				)
+			);
+		}
+	}
+};
+
 /* CONSTRUCTOR */
 const C: GlobalDescription = {
-	// @ts-ignore
 	__proto__: null,
 	[ValueProperties]: IMPURE,
 	prototype: O
@@ -39,26 +152,35 @@ const C: GlobalDescription = {
 
 /* PURE CONSTRUCTOR */
 const PC: GlobalDescription = {
-	// @ts-ignore
 	__proto__: null,
 	[ValueProperties]: PURE,
 	prototype: O
 };
 
-const ARRAY_TYPE: GlobalDescription = {
-	// @ts-ignore
+const PC_WITH_ARRAY = {
 	__proto__: null,
-	[ValueProperties]: PURE,
-	from: PF,
+	[ValueProperties]: PURE_WITH_ARRAY,
+	prototype: O
+};
+
+const ARRAY_TYPE: GlobalDescription = {
+	__proto__: null,
+	[ValueProperties]: PURE_WITH_ARRAY_OR_LENGTH,
+	from: O,
 	of: PF,
 	prototype: O
 };
 
 const INTL_MEMBER: GlobalDescription = {
-	// @ts-ignore
 	__proto__: null,
 	[ValueProperties]: PURE,
 	supportedLocalesOf: PC
+};
+
+const UNKNOWN_WELL_KNOWN: ValueDescription = {
+	deoptimizeArgumentsOnCall: doNothing,
+	getLiteralValue: () => UnknownWellKnown,
+	hasEffectsWhenCalled: returnTrue
 };
 
 const knownGlobals: GlobalDescription = {
@@ -69,11 +191,9 @@ const knownGlobals: GlobalDescription = {
 	window: O,
 
 	// Common globals
-	// @ts-ignore
 	__proto__: null,
 	[ValueProperties]: IMPURE,
 	Array: {
-		// @ts-ignore
 		__proto__: null,
 		[ValueProperties]: IMPURE,
 		from: O,
@@ -82,22 +202,20 @@ const knownGlobals: GlobalDescription = {
 		prototype: O
 	},
 	ArrayBuffer: {
-		// @ts-ignore
 		__proto__: null,
 		[ValueProperties]: PURE,
 		isView: PF,
 		prototype: O
 	},
+	AggregateError: PC_WITH_ARRAY,
 	Atomics: O,
 	BigInt: C,
 	BigInt64Array: C,
 	BigUint64Array: C,
 	Boolean: PC,
-	// @ts-ignore
 	constructor: C,
 	DataView: PC,
 	Date: {
-		// @ts-ignore
 		__proto__: null,
 		[ValueProperties]: PURE,
 		now: PF,
@@ -113,10 +231,10 @@ const knownGlobals: GlobalDescription = {
 	escape: PF,
 	eval: O,
 	EvalError: PC,
+	FinalizationRegistry: C,
 	Float32Array: ARRAY_TYPE,
 	Float64Array: ARRAY_TYPE,
 	Function: C,
-	// @ts-ignore
 	hasOwnProperty: O,
 	Infinity: O,
 	Int16Array: ARRAY_TYPE,
@@ -124,12 +242,10 @@ const knownGlobals: GlobalDescription = {
 	Int8Array: ARRAY_TYPE,
 	isFinite: PF,
 	isNaN: PF,
-	// @ts-ignore
 	isPrototypeOf: O,
 	JSON: O,
-	Map: PC,
+	Map: PC_WITH_ARRAY,
 	Math: {
-		// @ts-ignore
 		__proto__: null,
 		[ValueProperties]: IMPURE,
 		abs: PF,
@@ -170,7 +286,6 @@ const knownGlobals: GlobalDescription = {
 	},
 	NaN: O,
 	Number: {
-		// @ts-ignore
 		__proto__: null,
 		[ValueProperties]: PURE,
 		isFinite: PF,
@@ -182,45 +297,79 @@ const knownGlobals: GlobalDescription = {
 		prototype: O
 	},
 	Object: {
-		// @ts-ignore
 		__proto__: null,
 		[ValueProperties]: PURE,
 		create: PF,
-		getNotifier: PF,
-		getOwn: PF,
+		// Technically those can throw in certain situations, but we ignore this as
+		// code that relies on this will hopefully wrap this in a try-catch, which
+		// deoptimizes everything anyway
+		defineProperty: MUTATES_ARG_WITHOUT_ACCESSOR,
+		defineProperties: MUTATES_ARG_WITHOUT_ACCESSOR,
+		freeze: MUTATES_ARG_WITHOUT_ACCESSOR,
 		getOwnPropertyDescriptor: PF,
+		getOwnPropertyDescriptors: PF,
 		getOwnPropertyNames: PF,
 		getOwnPropertySymbols: PF,
 		getPrototypeOf: PF,
+		hasOwn: PF,
 		is: PF,
 		isExtensible: PF,
 		isFrozen: PF,
 		isSealed: PF,
 		keys: PF,
+		fromEntries: O,
+		entries: PF_NO_GETTER,
+		values: PF_NO_GETTER,
 		prototype: O
 	},
 	parseFloat: PF,
 	parseInt: PF,
 	Promise: {
-		// @ts-ignore
 		__proto__: null,
 		[ValueProperties]: IMPURE,
-		all: PF,
+		all: O,
+		allSettled: O,
+		any: O,
 		prototype: O,
-		race: PF,
-		resolve: PF
+		race: O,
+		reject: O,
+		resolve: O
 	},
-	// @ts-ignore
 	propertyIsEnumerable: O,
-	Proxy: O,
+	Proxy: {
+		__proto__: null,
+		[ValueProperties]: {
+			deoptimizeArgumentsOnCall: ({ args: [, target, parameter] }) => {
+				if (isObjectExpressionNode(parameter)) {
+					const hasSpreadElement = parameter.properties.some(property => !isPropertyNode(property));
+					if (!hasSpreadElement) {
+						for (const property of parameter.properties) {
+							property.deoptimizeArgumentsOnInteractionAtPath(
+								{
+									args: [null, target],
+									type: INTERACTION_CALLED,
+									withNew: false
+								},
+								EMPTY_PATH,
+								SHARED_RECURSION_TRACKER
+							);
+						}
+						return;
+					}
+				}
+				target.deoptimizePath(UNKNOWN_PATH);
+			},
+			getLiteralValue: getUnknownValue,
+			hasEffectsWhenCalled: returnTrue
+		}
+	},
 	RangeError: PC,
 	ReferenceError: PC,
 	Reflect: O,
 	RegExp: PC,
-	Set: PC,
+	Set: PC_WITH_ARRAY,
 	SharedArrayBuffer: C,
 	String: {
-		// @ts-ignore
 		__proto__: null,
 		[ValueProperties]: PURE,
 		fromCharCode: PF,
@@ -229,17 +378,18 @@ const knownGlobals: GlobalDescription = {
 		raw: PF
 	},
 	Symbol: {
-		// @ts-ignore
 		__proto__: null,
 		[ValueProperties]: PURE,
 		for: PF,
 		keyFor: PF,
-		prototype: O
+		prototype: O,
+		asyncDispose: getWellKnownSymbol(SymbolAsyncDispose),
+		dispose: getWellKnownSymbol(SymbolDispose),
+		hasInstance: getWellKnownSymbol(SymbolHasInstance),
+		toStringTag: getWellKnownSymbol(SymbolToStringTag)
 	},
 	SyntaxError: PC,
-	// @ts-ignore
 	toLocaleString: O,
-	// @ts-ignore
 	toString: O,
 	TypeError: PC,
 	Uint16Array: ARRAY_TYPE,
@@ -250,31 +400,61 @@ const knownGlobals: GlobalDescription = {
 	// undefined: ?,
 	unescape: PF,
 	URIError: PC,
-	// @ts-ignore
 	valueOf: O,
-	WeakMap: PC,
-	WeakSet: PC,
+	WeakMap: PC_WITH_ARRAY,
+	WeakRef: C,
+	WeakSet: PC_WITH_ARRAY,
 
 	// Additional globals shared by Node and Browser that are not strictly part of the language
 	clearInterval: C,
 	clearTimeout: C,
-	console: O,
+	console: {
+		__proto__: null,
+		[ValueProperties]: IMPURE,
+		assert: C,
+		clear: C,
+		count: C,
+		countReset: C,
+		debug: C,
+		dir: C,
+		dirxml: C,
+		error: C,
+		exception: C,
+		group: C,
+		groupCollapsed: C,
+		groupEnd: C,
+		info: C,
+		log: C,
+		table: C,
+		time: C,
+		timeEnd: C,
+		timeLog: C,
+		trace: C,
+		warn: C
+	},
 	Intl: {
-		// @ts-ignore
 		__proto__: null,
 		[ValueProperties]: IMPURE,
 		Collator: INTL_MEMBER,
 		DateTimeFormat: INTL_MEMBER,
+		DisplayNames: INTL_MEMBER,
 		ListFormat: INTL_MEMBER,
+		Locale: INTL_MEMBER,
 		NumberFormat: INTL_MEMBER,
 		PluralRules: INTL_MEMBER,
-		RelativeTimeFormat: INTL_MEMBER
+		RelativeTimeFormat: INTL_MEMBER,
+		Segmenter: INTL_MEMBER
 	},
 	setInterval: C,
 	setTimeout: C,
 	TextDecoder: C,
 	TextEncoder: C,
-	URL: C,
+	URL: {
+		__proto__: null,
+		[ValueProperties]: IMPURE,
+		prototype: O,
+		canParse: PF
+	},
 	URLSearchParams: C,
 
 	// Browser specific globals
@@ -359,7 +539,17 @@ const knownGlobals: GlobalDescription = {
 	CSSSupportsRule: C,
 	CustomElementRegistry: C,
 	customElements: O,
-	CustomEvent: C,
+	CustomEvent: {
+		__proto__: null,
+		[ValueProperties]: {
+			deoptimizeArgumentsOnCall({ args }: NodeInteractionCalled) {
+				args[2]?.deoptimizePath(['detail']);
+			},
+			getLiteralValue: getUnknownValue,
+			hasEffectsWhenCalled: returnFalse
+		},
+		prototype: O
+	},
 	DataTransfer: C,
 	DataTransferItem: C,
 	DataTransferItemList: C,
@@ -866,28 +1056,18 @@ for (const global of ['window', 'global', 'self', 'globalThis']) {
 	knownGlobals[global] = knownGlobals;
 }
 
-function getGlobalAtPath(path: ObjectPath): ValueDescription | null {
-	let currentGlobal = knownGlobals;
+export function getGlobalAtPath(path: ObjectPath): ValueDescription | null {
+	let currentGlobal: GlobalDescription | null = knownGlobals;
 	for (const pathSegment of path) {
 		if (typeof pathSegment !== 'string') {
 			return null;
 		}
 		currentGlobal = currentGlobal[pathSegment];
 		if (!currentGlobal) {
-			return null;
+			// Well-known symbols very often have a complex meaning and are invoked implicitly by the language.
+			// Resolve them to a special value so they can be distinguished and excluded from treeshaking.
+			return path[0] === 'Symbol' && path.length === 2 ? UNKNOWN_WELL_KNOWN : null;
 		}
 	}
 	return currentGlobal[ValueProperties];
-}
-
-export function isPureGlobal(path: ObjectPath): boolean {
-	const globalAtPath = getGlobalAtPath(path);
-	return globalAtPath !== null && globalAtPath.pure;
-}
-
-export function isGlobalMember(path: ObjectPath): boolean {
-	if (path.length === 1) {
-		return path[0] === 'undefined' || getGlobalAtPath(path) !== null;
-	}
-	return getGlobalAtPath(path.slice(0, -1)) !== null;
 }

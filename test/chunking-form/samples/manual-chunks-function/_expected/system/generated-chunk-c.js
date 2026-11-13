@@ -1,11 +1,12 @@
-System.register(['./generated-chunk-b.js'], function () {
+System.register([], (function () {
 	'use strict';
 	return {
-		setters: [function () {}],
-		execute: function () {
+		execute: (function () {
+
+			console.log('dep2');
 
 			console.log('dep-c');
 
-		}
+		})
 	};
-});
+}));

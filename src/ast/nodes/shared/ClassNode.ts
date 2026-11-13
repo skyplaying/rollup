@@ -1,47 +1,235 @@
-import { CallOptions } from '../../CallOptions';
-import { HasEffectsContext } from '../../ExecutionContext';
+import type { DeoptimizableEntity } from '../../DeoptimizableEntity';
+import { type HasEffectsContext, type InclusionContext } from '../../ExecutionContext';
+import type { NodeInteraction, NodeInteractionCalled } from '../../NodeInteractions';
+import { INTERACTION_CALLED } from '../../NodeInteractions';
 import ChildScope from '../../scopes/ChildScope';
-import Scope from '../../scopes/Scope';
-import { ObjectPath } from '../../utils/PathTracker';
-import ClassBody from '../ClassBody';
+import { checkEffectForNodes } from '../../utils/checkEffectForNodes';
+import {
+	EMPTY_PATH,
+	type EntityPathTracker,
+	isAnyWellKnown,
+	type ObjectPath,
+	SHARED_RECURSION_TRACKER,
+	UNKNOWN_PATH,
+	UnknownKey
+} from '../../utils/PathTracker';
+import type ClassBody from '../ClassBody';
+import type Decorator from '../Decorator';
 import Identifier from '../Identifier';
-import { ExpressionNode, NodeBase } from './Node';
+import type Literal from '../Literal';
+import MethodDefinition from '../MethodDefinition';
+import PropertyDefinition from '../PropertyDefinition';
+import { isStaticBlock } from '../StaticBlock';
+import { type ExpressionEntity, type LiteralValueOrUnknown } from './Expression';
+import { type ExpressionNode, type IncludeChildren, NodeBase, onlyIncludeSelf } from './Node';
+import { ObjectEntity, type ObjectProperty } from './ObjectEntity';
+import { ObjectMember } from './ObjectMember';
+import { OBJECT_PROTOTYPE } from './ObjectPrototype';
 
-export default class ClassNode extends NodeBase {
-	body!: ClassBody;
-	id!: Identifier | null;
-	superClass!: ExpressionNode | null;
+export default class ClassNode extends NodeBase implements DeoptimizableEntity {
+	declare body: ClassBody;
+	declare id: Identifier | null;
+	declare superClass: ExpressionNode | null;
+	declare decorators: Decorator[];
+	declare private classConstructor: MethodDefinition | null;
+	declare private instanceEntity: ObjectEntity;
+	private instanceFieldValues: ExpressionNode[] | null = null;
+	private objectEntity: ObjectEntity | null = null;
 
-	createScope(parentScope: Scope) {
-		this.scope = new ChildScope(parentScope);
+	createScope(parentScope: ChildScope): void {
+		this.scope = new ChildScope(parentScope, parentScope.context);
 	}
 
-	hasEffectsWhenAccessedAtPath(path: ObjectPath) {
-		if (path.length <= 1) return false;
-		return path.length > 2 || path[0] !== 'prototype';
-	}
-
-	hasEffectsWhenAssignedAtPath(path: ObjectPath) {
-		if (path.length <= 1) return false;
-		return path.length > 2 || path[0] !== 'prototype';
-	}
-
-	hasEffectsWhenCalledAtPath(
+	deoptimizeArgumentsOnInteractionAtPath(
+		interaction: NodeInteraction,
 		path: ObjectPath,
-		callOptions: CallOptions,
-		context: HasEffectsContext
-	) {
-		if (!callOptions.withNew) return true;
-		return (
-			this.body.hasEffectsWhenCalledAtPath(path, callOptions, context) ||
-			(this.superClass !== null &&
-				this.superClass.hasEffectsWhenCalledAtPath(path, callOptions, context))
+		recursionTracker: EntityPathTracker
+	): void {
+		this.getObjectEntity().deoptimizeArgumentsOnInteractionAtPath(
+			interaction,
+			path,
+			recursionTracker
 		);
 	}
 
-	initialise() {
-		if (this.id !== null) {
-			this.id.declare('class', this);
+	deoptimizeCache(): void {
+		this.getObjectEntity().deoptimizeAllProperties();
+	}
+
+	deoptimizePath(path: ObjectPath): void {
+		this.getObjectEntity().deoptimizePath(path);
+	}
+
+	getLiteralValueAtPath(
+		path: ObjectPath,
+		recursionTracker: EntityPathTracker,
+		origin: DeoptimizableEntity
+	): LiteralValueOrUnknown {
+		return this.getObjectEntity().getLiteralValueAtPath(path, recursionTracker, origin);
+	}
+
+	getReturnExpressionWhenCalledAtPath(
+		path: ObjectPath,
+		interaction: NodeInteractionCalled,
+		recursionTracker: EntityPathTracker,
+		origin: DeoptimizableEntity
+	): [expression: ExpressionEntity, isPure: boolean] {
+		return this.getObjectEntity().getReturnExpressionWhenCalledAtPath(
+			path,
+			interaction,
+			recursionTracker,
+			origin
+		);
+	}
+
+	hasEffects(context: HasEffectsContext): boolean {
+		if (!this.deoptimized) this.applyDeoptimizations();
+		const initEffect = this.superClass?.hasEffects(context) || this.body.hasEffects(context);
+		this.id?.markDeclarationReached();
+		return initEffect || super.hasEffects(context) || checkEffectForNodes(this.decorators, context);
+	}
+
+	hasEffectsOnInteractionAtPath(
+		path: ObjectPath,
+		interaction: NodeInteraction,
+		context: HasEffectsContext
+	): boolean {
+		return interaction.type === INTERACTION_CALLED && path.length === 0
+			? !interaction.withNew ||
+					(this.classConstructor === null
+						? this.superClass?.hasEffectsOnInteractionAtPath(path, interaction, context)
+						: this.classConstructor.hasEffectsOnInteractionAtPath(path, interaction, context)) ||
+					this.hasEffectsOnInstanceFieldInitialization(context)
+			: this.getObjectEntity().hasEffectsOnInteractionAtPath(path, interaction, context);
+	}
+
+	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren): void {
+		if (!this.included) this.includeNode(context);
+		this.superClass?.include(context, includeChildrenRecursively);
+		this.body.include(context, includeChildrenRecursively);
+		for (const decorator of this.decorators) decorator.include(context, includeChildrenRecursively);
+		if (this.id) {
+			this.id.markDeclarationReached();
+			this.id.include(context, includeChildrenRecursively);
 		}
 	}
+
+	initialise(): void {
+		super.initialise();
+		this.id?.declare('class', EMPTY_PATH, this);
+		this.instanceEntity = new ObjectEntity(new Map(), new ObjectMember(this, ['prototype']));
+		// This makes sure that all deoptimizations of "this" are applied to the
+		// instance entity, even if the class is only instantiated by unknown code.
+		this.body.scope.instanceThisVariable.addArgumentForDeoptimization(this.instanceEntity);
+		for (const method of this.body.body) {
+			if (method instanceof MethodDefinition && method.kind === 'constructor') {
+				this.classConstructor = method;
+				return;
+			}
+		}
+		this.classConstructor = null;
+	}
+
+	applyDeoptimizations() {
+		this.deoptimized = true;
+		for (const definition of this.body.body) {
+			if (
+				!isStaticBlock(definition) &&
+				!(
+					definition.static ||
+					(definition instanceof MethodDefinition && definition.kind === 'constructor')
+				)
+			) {
+				// Calls to methods are not tracked, ensure that the return value is deoptimized
+				definition.deoptimizePath(UNKNOWN_PATH);
+			}
+		}
+		this.scope.context.requestTreeshakingPass();
+	}
+
+	private hasEffectsOnInstanceFieldInitialization(context: HasEffectsContext): boolean {
+		const fieldValues = this.getInstanceFieldValues();
+		if (fieldValues.length === 0) return false;
+		const { replacedVariableInits } = context;
+		const thisVariable = this.body.scope.instanceThisVariable;
+		const thisInit = replacedVariableInits.get(thisVariable);
+		replacedVariableInits.set(thisVariable, this.instanceEntity);
+		const hasEffects = fieldValues.some(value => value.hasEffects(context));
+		if (thisInit) {
+			replacedVariableInits.set(thisVariable, thisInit);
+		} else {
+			replacedVariableInits.delete(thisVariable);
+		}
+		return hasEffects;
+	}
+
+	private getInstanceFieldValues(): ExpressionNode[] {
+		if (this.instanceFieldValues === null) {
+			this.instanceFieldValues = [];
+			for (const definition of this.body.body) {
+				if (
+					definition instanceof PropertyDefinition &&
+					!definition.static &&
+					definition.value !== null
+				) {
+					this.instanceFieldValues.push(definition.value);
+				}
+			}
+		}
+		return this.instanceFieldValues;
+	}
+
+	private getObjectEntity(): ObjectEntity {
+		if (this.objectEntity !== null) {
+			return this.objectEntity;
+		}
+		const staticProperties: ObjectProperty[] = [];
+		const dynamicMethods: ObjectProperty[] = [];
+		for (const definition of this.body.body) {
+			if (isStaticBlock(definition)) continue;
+			const properties = definition.static ? staticProperties : dynamicMethods;
+			const definitionKind = (definition as MethodDefinition | { kind: undefined }).kind;
+			// Note that class fields do not end up on the prototype
+			if (properties === dynamicMethods && !definitionKind) continue;
+			const kind = definitionKind === 'set' || definitionKind === 'get' ? definitionKind : 'init';
+			let key: string;
+			if (definition.computed) {
+				const keyValue = definition.key.getLiteralValueAtPath(
+					EMPTY_PATH,
+					SHARED_RECURSION_TRACKER,
+					this
+				);
+				if (typeof keyValue === 'symbol') {
+					properties.push({
+						key: isAnyWellKnown(keyValue) ? keyValue : UnknownKey,
+						kind,
+						property: definition
+					});
+					continue;
+				} else {
+					key = String(keyValue);
+				}
+			} else {
+				key =
+					definition.key instanceof Identifier
+						? definition.key.name
+						: String((definition.key as Literal).value);
+			}
+			properties.push({ key, kind, property: definition });
+		}
+		staticProperties.unshift({
+			key: 'prototype',
+			kind: 'init',
+			property: new ObjectEntity(
+				dynamicMethods,
+				this.superClass ? new ObjectMember(this.superClass, ['prototype']) : OBJECT_PROTOTYPE
+			)
+		});
+		return (this.objectEntity = new ObjectEntity(
+			staticProperties,
+			this.superClass || OBJECT_PROTOTYPE
+		));
+	}
 }
+
+ClassNode.prototype.includeNode = onlyIncludeSelf;

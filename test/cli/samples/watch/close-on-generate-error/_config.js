@@ -1,8 +1,8 @@
-const { assertIncludes } = require('../../../../utils.js');
+const { assertIncludes } = require('../../../../testHelpers.js');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'closes the bundle on generate errors',
-	command: 'rollup -cw',
+	spawnArgs: ['-cw'],
 	abortOnStderr(data) {
 		if (data.includes('Bundle closed')) {
 			return true;
@@ -11,9 +11,9 @@ module.exports = {
 	stderr(stderr) {
 		assertIncludes(
 			stderr,
-			'[!] Error: You must specify "output.file" or "output.dir" for the build.'
+			'[!] RollupError: You must specify "output.file" or "output.dir" for the build.'
 		);
 		assertIncludes(stderr, 'Bundle closed');
 		return false;
 	}
-};
+});

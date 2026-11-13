@@ -1,4 +1,4 @@
-System.register(['./generated-dep1.js'], function (exports) {
+System.register(['./generated-dep1.js'], (function (exports) {
   'use strict';
   var fn, text;
   return {
@@ -6,15 +6,15 @@ System.register(['./generated-dep1.js'], function (exports) {
       fn = module.a;
       text = module.b;
     }],
-    execute: function () {
+    execute: (function () {
 
       class Main2 {
         constructor () {
           fn();
           console.log(text);
         }
-      } exports('default', Main2);
+      } exports("default", Main2);
 
-    }
+    })
   };
-});
+}));

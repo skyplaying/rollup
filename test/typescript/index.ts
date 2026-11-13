@@ -1,21 +1,110 @@
-import * as rollup from './dist/rollup';
+import type * as rollup from './dist/rollup';
 
 // Plugin API
 interface Options {
 	extensions?: string | string[];
 }
+
 const plugin: rollup.PluginImpl<Options> = (options = {}) => {
-	// tslint:disable-next-line:no-unused-variable
-	const extensions = options.extensions || ['.js'];
-	return { name: 'my-plugin' };
+	const _extensions = options.extensions || ['.js'];
+	return {
+		name: 'my-plugin',
+		resolveId: {
+			handler(source, _importer, _options) {
+				// @ts-expect-error source is typed as string
+				const _s: number = source;
+			}
+		}
+	};
 };
 
 plugin();
 plugin({ extensions: ['.js', 'json'] });
 
-const amdOutputOptions: rollup.OutputOptions['amd'][] = [
+const _pluginHooks: rollup.Plugin = {
+	buildStart: {
+		handler() {},
+		sequential: true
+	},
+	async load(id) {
+		// @ts-expect-error id is typed as string
+		const _index: number = id;
+		await this.resolve('rollup');
+	},
+	name: 'test',
+	renderChunk(_code, { modules }) {
+		for (const id in modules) {
+			// @ts-expect-error Cannot assign to 'code' because it is a read-only property
+			modules[id].code += '\n';
+		}
+	},
+	resolveId: {
+		async handler(source, _importer, _options) {
+			await this.resolve('rollup');
+			// @ts-expect-error source is typed as string
+			const _s: number = source;
+		},
+		// @ts-expect-error sequential is only supported for parallel hooks
+		sequential: true
+	}
+};
+
+const _pluginHookFilters: rollup.Plugin = {
+	load: {
+		filter: {
+			// @ts-expect-error 'code' filter is not supported for load
+			code: 'bar',
+			id: 'foo'
+		},
+		handler(_source) {}
+	},
+	name: 'test',
+	resolveId: {
+		filter: {
+			// @ts-expect-error 'code' filter is not supported for resolveId
+			code: 'bar',
+			id: /foo/
+		},
+		handler(_source) {}
+	},
+	transform: {
+		filter: {
+			code: 'bar',
+			id: 'foo'
+		},
+		handler(_code) {}
+	}
+};
+
+const _indexSourcemapPlugin: rollup.Plugin = {
+	load() {
+		return {
+			code: '',
+			map: {
+				sections: [
+					{
+						map: { mappings: 'AAAA', names: [], sources: ['a.js'], version: 3 },
+						offset: { column: 0, line: 0 }
+					}
+				],
+				version: 3
+			}
+		};
+	},
+	name: 'test'
+};
+
+const _amdOutputOptions: rollup.OutputOptions['amd'][] = [
 	{},
 	{
+		autoId: undefined,
+		id: undefined
+	},
+	{
+		id: 'a'
+	},
+	{
+		autoId: undefined,
 		id: 'a'
 	},
 	{
@@ -30,28 +119,41 @@ const amdOutputOptions: rollup.OutputOptions['amd'][] = [
 		autoId: true
 	},
 	{
+		autoId: true,
+		basePath: undefined,
+		id: undefined
+	},
+	{
 		autoId: false
 	},
 	{
-		// @ts-expect-error
 		autoId: false,
+		// @ts-expect-error for "basePath", "autoId" needs to be true
 		basePath: '',
-		// @ts-expect-error
 		id: 'a'
 	},
 	{
-		// @ts-expect-error
 		autoId: true,
-		// @ts-expect-error
+		// @ts-expect-error cannot combine "id" and "autoId"
 		id: 'a'
 	},
 	{
+		// @ts-expect-error cannot combine "id" and "basePath"
 		basePath: '',
-		// @ts-expect-error
 		id: 'a'
 	},
-	// @ts-expect-error
+	// @ts-expect-error needs "autoId" for "basePath"
 	{
 		basePath: ''
 	}
 ];
+
+const _nullSourcesPlugin: rollup.Plugin = {
+	load() {
+		return {
+			code: '',
+			map: { mappings: 'AAAA', names: [], sources: [null], sourcesContent: [null], version: 3 }
+		};
+	},
+	name: 'test'
+};

@@ -1,18 +1,18 @@
-System.register(['./generated-main.js'], function (exports) {
+System.register(['./generated-main.js'], (function (exports) {
   'use strict';
   var multiplier;
   return {
     setters: [function (module) {
       multiplier = module.m;
     }],
-    execute: function () {
+    execute: (function () {
 
-      exports('mult', mult);
+      exports("mult", mult);
 
       function mult (num) {
         return num + multiplier;
       }
 
-    }
+    })
   };
-});
+}));

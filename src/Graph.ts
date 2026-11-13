@@ -1,29 +1,39 @@
-import * as acorn from 'acorn';
+import flru from 'flru';
+import { createInclusionContext } from './ast/ExecutionContext';
+import type { ExpressionEntity } from './ast/nodes/shared/Expression';
 import GlobalScope from './ast/scopes/GlobalScope';
-import { PathTracker } from './ast/utils/PathTracker';
-import ExternalModule from './ExternalModule';
+import { EntityPathTracker } from './ast/utils/PathTracker';
+import type ExternalModule from './ExternalModule';
 import Module from './Module';
-import { ModuleLoader, UnresolvedModule } from './ModuleLoader';
-import {
+import { ModuleLoader, type UnresolvedModule } from './ModuleLoader';
+import type {
 	ModuleInfo,
 	ModuleJSON,
 	NormalizedInputOptions,
+	ProgramNode,
 	RollupCache,
-	RollupWatcher,
 	SerializablePluginCache,
 	WatchChangeHook
 } from './rollup/types';
 import { BuildPhase } from './utils/buildPhase';
-import { errImplicitDependantIsNotIncluded, error } from './utils/error';
 import { analyseModuleExecution } from './utils/executionOrder';
+import { unescapeExportName } from './utils/exportNames';
+import { LOGLEVEL_WARN } from './utils/logging';
+import {
+	error,
+	logCircularDependency,
+	logImplicitDependantIsNotIncluded,
+	logMissingExport
+} from './utils/logs';
 import { PluginDriver } from './utils/PluginDriver';
-import { markPureCallExpressions } from './utils/pureComments';
-import relativeId from './utils/relativeId';
+import type { PureFunctions } from './utils/pureFunctions';
+import { getPureFunctions } from './utils/pureFunctions';
+import Queue from './utils/Queue';
 import { timeEnd, timeStart } from './utils/timers';
 import { markModuleAndImpureDependenciesAsExecuted } from './utils/traverseStaticDependencies';
 
 function normalizeEntryModules(
-	entryModules: string[] | Record<string, string>
+	entryModules: readonly string[] | Record<string, string>
 ): UnresolvedModule[] {
 	if (Array.isArray(entryModules)) {
 		return entryModules.map(id => ({
@@ -34,37 +44,48 @@ function normalizeEntryModules(
 			name: null
 		}));
 	}
-	return Object.keys(entryModules).map(name => ({
+	return Object.entries(entryModules).map(([name, id]) => ({
 		fileName: null,
-		id: entryModules[name],
+		id,
 		implicitlyLoadedAfter: [],
 		importer: undefined,
 		name
 	}));
 }
 
+export interface GraphWatchHooks {
+	closeWatcher(): Promise<void>;
+	watchChange(...parameters: Parameters<WatchChangeHook>): Promise<void>;
+}
+
+export type RegisterWatchHooks = (watchHooks: GraphWatchHooks) => void;
+
 export default class Graph {
-	acornParser: typeof acorn.Parser;
-	cachedModules: Map<string, ModuleJSON>;
-	deoptimizationTracker: PathTracker;
+	readonly astLru = flru<ProgramNode>(5);
+	readonly cachedModules = new Map<string, ModuleJSON>();
+	readonly deoptimizationTracker = new EntityPathTracker();
 	entryModules: Module[] = [];
-	moduleLoader: ModuleLoader;
-	modulesById = new Map<string, Module | ExternalModule>();
+	readonly fileOperationQueue: Queue;
+	readonly moduleLoader: ModuleLoader;
+	readonly modulesById = new Map<string, Module | ExternalModule>();
 	needsTreeshakingPass = false;
+	readonly newlyIncludedVariableInits = new Set<ExpressionEntity>();
 	phase: BuildPhase = BuildPhase.LOAD_AND_PARSE;
-	pluginDriver: PluginDriver;
-	scope: GlobalScope;
-	watchFiles: Record<string, true> = Object.create(null);
+	readonly pluginDriver: PluginDriver;
+	readonly pureFunctions: PureFunctions;
+	readonly scope = new GlobalScope();
+	readonly watchFiles: Record<string, true> = Object.create(null);
 	watchMode = false;
 
-	private externalModules: ExternalModule[] = [];
+	private readonly externalModules: ExternalModule[] = [];
 	private implicitEntryModules: Module[] = [];
 	private modules: Module[] = [];
-	private pluginCache?: Record<string, SerializablePluginCache>;
+	declare private pluginCache?: Record<string, SerializablePluginCache>;
 
-	constructor(private readonly options: NormalizedInputOptions, watcher: RollupWatcher | null) {
-		this.deoptimizationTracker = new PathTracker();
-		this.cachedModules = new Map();
+	constructor(
+		private readonly options: NormalizedInputOptions,
+		registerWatchHooks: RegisterWatchHooks | null
+	) {
 		if (options.cache !== false) {
 			if (options.cache?.modules) {
 				for (const module of options.cache.modules) this.cachedModules.set(module.id, module);
@@ -74,25 +95,21 @@ export default class Graph {
 			// increment access counter
 			for (const name in this.pluginCache) {
 				const cache = this.pluginCache[name];
-				for (const key of Object.keys(cache)) cache[key][0]++;
+				for (const value of Object.values(cache)) value[0]++;
 			}
 		}
 
-		if (watcher) {
+		if (registerWatchHooks) {
 			this.watchMode = true;
-			const handleChange: WatchChangeHook = (...args) => this.pluginDriver.hookSeqSync('watchChange', args);
-			const handleClose = () => this.pluginDriver.hookSeqSync('closeWatcher', []);
-			watcher.on('change', handleChange);
-			watcher.on('close', handleClose);
-			watcher.once('restart', () => {
-				watcher.removeListener('change', handleChange);
-				watcher.removeListener('close', handleClose);
+			registerWatchHooks({
+				closeWatcher: () => this.pluginDriver.hookParallel('closeWatcher', []),
+				watchChange: (...parameters) => this.pluginDriver.hookParallel('watchChange', parameters)
 			});
 		}
 		this.pluginDriver = new PluginDriver(this, options, options.plugins, this.pluginCache);
-		this.scope = new GlobalScope();
-		this.acornParser = acorn.Parser.extend(...(options.acornInjectPlugins as any));
 		this.moduleLoader = new ModuleLoader(this, this.modulesById, this.options, this.pluginDriver);
+		this.fileOperationQueue = new Queue(options.maxParallelFileOps);
+		this.pureFunctions = getPureFunctions(options);
 	}
 
 	async build(): Promise<void> {
@@ -100,10 +117,10 @@ export default class Graph {
 		await this.generateModuleGraph();
 		timeEnd('generate module graph', 2);
 
-		timeStart('sort modules', 2);
+		timeStart('sort and bind modules', 2);
 		this.phase = BuildPhase.ANALYSE;
-		this.sortModules();
-		timeEnd('sort modules', 2);
+		this.sortAndBindModules();
+		timeEnd('sort and bind modules', 2);
 
 		timeStart('mark included statements', 2);
 		this.includeStatements();
@@ -112,42 +129,13 @@ export default class Graph {
 		this.phase = BuildPhase.GENERATE;
 	}
 
-	contextParse(code: string, options: Partial<acorn.Options> = {}) {
-		const onCommentOrig = options.onComment;
-		const comments: acorn.Comment[] = [];
-
-		if (onCommentOrig && typeof onCommentOrig == 'function') {
-			options.onComment = (block, text, start, end, ...args) => {
-				comments.push({type: block ? "Block" : "Line", value: text, start, end});
-				return onCommentOrig.call(options, block, text, start, end, ...args);
-			}
-		} else {
-			options.onComment = comments;
-		}
-
-		const ast = this.acornParser.parse(code, {
-			...(this.options.acorn as acorn.Options),
-			...options
-		});
-
-		if (typeof onCommentOrig == 'object') {
-			onCommentOrig.push(...comments);
-		}
-
-		options.onComment = onCommentOrig;
-
-		markPureCallExpressions(comments, ast, code);
-
-		return ast;
-	}
-
 	getCache(): RollupCache {
 		// handle plugin cache eviction
 		for (const name in this.pluginCache) {
 			const cache = this.pluginCache[name];
 			let allDeleted = true;
-			for (const key of Object.keys(cache)) {
-				if (cache[key][0] >= this.options.experimentalCacheExpiry) delete cache[key];
+			for (const [key, value] of Object.entries(cache)) {
+				if (value[0] >= this.options.experimentalCacheExpiry) delete cache[key];
 				else allDeleted = false;
 			}
 			if (allDeleted) delete this.pluginCache[name];
@@ -166,14 +154,13 @@ export default class Graph {
 	};
 
 	private async generateModuleGraph(): Promise<void> {
-		({
-			entryModules: this.entryModules,
-			implicitEntryModules: this.implicitEntryModules
-		} = await this.moduleLoader.addEntryModules(normalizeEntryModules(this.options.input), true));
+		({ entryModules: this.entryModules, implicitEntryModules: this.implicitEntryModules } =
+			await this.moduleLoader.addEntryModules(normalizeEntryModules(this.options.input), true));
 		if (this.entryModules.length === 0) {
 			throw new Error('You must supply options.input to rollup');
 		}
 		for (const module of this.modulesById.values()) {
+			module.cacheInfoGetters();
 			if (module instanceof Module) {
 				this.modules.push(module);
 			} else {
@@ -182,25 +169,38 @@ export default class Graph {
 		}
 	}
 
-	private includeStatements() {
-		for (const module of [...this.entryModules, ...this.implicitEntryModules]) {
-			if (module.preserveSignature !== false) {
-				module.includeAllExports(false);
-			} else {
-				markModuleAndImpureDependenciesAsExecuted(module);
-			}
+	private includeStatements(): void {
+		const entryModules = [...this.entryModules, ...this.implicitEntryModules];
+		for (const module of entryModules) {
+			markModuleAndImpureDependenciesAsExecuted(module);
 		}
 		if (this.options.treeshake) {
 			let treeshakingPass = 1;
+			this.newlyIncludedVariableInits.clear();
 			do {
 				timeStart(`treeshaking pass ${treeshakingPass}`, 3);
 				this.needsTreeshakingPass = false;
 				for (const module of this.modules) {
 					if (module.isExecuted) {
-						if (module.info.hasModuleSideEffects === 'no-treeshake') {
+						module.hasTreeShakingPassStarted = true;
+						if (module.info.moduleSideEffects === 'no-treeshake') {
 							module.includeAllInBundle();
 						} else {
 							module.include();
+						}
+						for (const entity of this.newlyIncludedVariableInits) {
+							this.newlyIncludedVariableInits.delete(entity);
+							entity.include(createInclusionContext(), false);
+						}
+					}
+				}
+				if (treeshakingPass === 1) {
+					// We only include exports after the first pass to avoid issues with
+					// the TDZ detection logic
+					for (const module of entryModules) {
+						if (module.preserveSignature !== false) {
+							module.includeAllExports();
+							this.needsTreeshakingPass = true;
 						}
 					}
 				}
@@ -211,23 +211,18 @@ export default class Graph {
 		}
 		for (const externalModule of this.externalModules) externalModule.warnUnusedImports();
 		for (const module of this.implicitEntryModules) {
-			for (const dependant of module.implicitlyLoadedAfter) {
-				if (!(dependant.info.isEntry || dependant.isIncluded())) {
-					error(errImplicitDependantIsNotIncluded(dependant));
+			for (const dependent of module.implicitlyLoadedAfter) {
+				if (!(dependent.info.isEntry || dependent.isIncluded())) {
+					error(logImplicitDependantIsNotIncluded(dependent));
 				}
 			}
 		}
 	}
 
-	private sortModules() {
+	private sortAndBindModules(): void {
 		const { orderedModules, cyclePaths } = analyseModuleExecution(this.entryModules);
 		for (const cyclePath of cyclePaths) {
-			this.options.onwarn({
-				code: 'CIRCULAR_DEPENDENCY',
-				cycle: cyclePath,
-				importer: cyclePath[0],
-				message: `Circular dependency: ${cyclePath.join(' -> ')}`
-			});
+			this.options.onLog(LOGLEVEL_WARN, logCircularDependency(cyclePath));
 		}
 		this.modules = orderedModules;
 		for (const module of this.modules) {
@@ -236,25 +231,26 @@ export default class Graph {
 		this.warnForMissingExports();
 	}
 
-	private warnForMissingExports() {
+	private warnForMissingExports(): void {
 		for (const module of this.modules) {
-			for (const importName of Object.keys(module.importDescriptions)) {
-				const importDescription = module.importDescriptions[importName];
-				if (
-					importDescription.name !== '*' &&
-					!(importDescription.module as Module).getVariableForExportName(importDescription.name)
-				) {
-					module.warn(
-						{
-							code: 'NON_EXISTENT_EXPORT',
-							message: `Non-existent export '${
-								importDescription.name
-							}' is imported from ${relativeId((importDescription.module as Module).id)}`,
-							name: importDescription.name,
-							source: (importDescription.module as Module).id
-						},
-						importDescription.start
+			for (const importDescription of module.importDescriptions.values()) {
+				if (importDescription.name !== '*' && importDescription.phase !== 'source') {
+					const [variable, options] = importDescription.module.getVariableForExportName(
+						importDescription.name,
+						{ importChain: [module.id] }
 					);
+					if (!variable) {
+						module.log(
+							LOGLEVEL_WARN,
+							logMissingExport(
+								unescapeExportName(importDescription.name),
+								module.id,
+								importDescription.module.id,
+								!!options?.missingButExportExists
+							),
+							importDescription.start
+						);
+					}
 				}
 			}
 		}

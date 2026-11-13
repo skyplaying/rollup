@@ -1,6 +1,6 @@
-const { resolve } = require('path');
+const path = require('node:path');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'guesses global names if necessary',
 	expectedWarnings: ['MISSING_GLOBAL_NAME'],
 	options: {
@@ -9,7 +9,7 @@ module.exports = {
 			'changed',
 			'special-character',
 			'with/slash',
-			resolve(__dirname, 'relative.js')
+			path.resolve(__dirname, 'relative.js')
 		]
 	}
-};
+});

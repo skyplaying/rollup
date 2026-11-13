@@ -1,18 +1,49 @@
-const p1 = new Promise( () => {
-	console.log( 'fire & forget' );
-} );
+Promise.resolve({
+	then() {
+		console.log(1);
+	}
+});
 
-const p2 = new Promise( () => {
-	console.info( 'forget me as well' );
-} );
+Promise.resolve({
+	get then() {
+		return () => console.log(2);
+	}
+});
 
-const p3 = new Promise( () => {
-	console.info( 'and me too' );
-} );
+Promise.reject('should be kept for uncaught rejections');
 
-const p4 = Promise.resolve('no side effect');
-const p5 = Promise.reject('should be kept for uncaught rejections');
+Promise.all([
+	{
+		then() {
+			console.log(3);
+		}
+	},
+	null
+]);
 
-const all = Promise.all([p2, p3]);
-export const allExported = Promise.all([p2, p3]);
-const race = Promise.race([p2, p3]);
+Promise.all([
+	null,
+	{
+		get then() {
+			return () => console.log(4);
+		}
+	}
+]);
+
+Promise.race([
+	{
+		then() {
+			console.log(5);
+		}
+	},
+	null
+]);
+
+Promise.race([
+	null,
+	{
+		get then() {
+			return () => console.log(6);
+		}
+	}
+]);

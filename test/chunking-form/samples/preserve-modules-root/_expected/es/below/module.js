@@ -1,10 +1,7 @@
-import '../custom_modules/@my-scope/my-base-pkg/index.js';
-import { __exports as myBasePkg } from '../_virtual/index.js_commonjs-exports';
+import { getDefaultExportFromCjs } from '../_virtual/_commonjsHelpers.js';
+import { __require as requireModule } from './module2.js';
 
-const base2 = myBasePkg;
+var moduleExports = requireModule();
+var module$1 = /*@__PURE__*/getDefaultExportFromCjs(moduleExports);
 
-var module = {
-  base2,
-};
-
-export default module;
+export { module$1 as default };

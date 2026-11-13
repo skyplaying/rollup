@@ -1,38 +1,52 @@
 import Chunk from './Chunk';
+import ExternalChunk from './ExternalChunk';
 import ExternalModule from './ExternalModule';
-import Graph from './Graph';
+import type Graph from './Graph';
 import Module from './Module';
-import {
+import type {
 	GetManualChunk,
+	LogHandler,
 	NormalizedInputOptions,
 	NormalizedOutputOptions,
-	OutputBundle,
-	OutputBundleWithPlaceholders,
-	OutputChunk,
-	WarningHandler
+	OutputBundle
 } from './rollup/types';
-import { Addons, createAddons } from './utils/addons';
 import { getChunkAssignments } from './utils/chunkAssignment';
 import commondir from './utils/commondir';
-import {
-	errCannotAssignModuleToChunk,
-	errChunkInvalid,
-	error,
-	warnDeprecation
-} from './utils/error';
 import { sortByExecutionOrder } from './utils/executionOrder';
-import { FILE_PLACEHOLDER } from './utils/FileEmitter';
-import { basename, isAbsolute } from './utils/path';
-import { PluginDriver } from './utils/PluginDriver';
+import { getGenerateCodeSnippets } from './utils/generateCodeSnippets';
+import type { HashPlaceholderGenerator } from './utils/hashPlaceholders';
+import { getHashPlaceholderGenerator } from './utils/hashPlaceholders';
+import { LOGLEVEL_WARN } from './utils/logging';
+import {
+	error,
+	logCannotAssignModuleToChunk,
+	logChunkInvalid,
+	logCircularChunk,
+	logErrorInHook,
+	logFileNameOutsideOutputDirectory,
+	logInvalidOption
+} from './utils/logs';
+import type { OutputBundleWithPlaceholders } from './utils/outputBundle';
+import { getOutputBundle, removeUnreferencedAssets } from './utils/outputBundle';
+import { parseAst } from './utils/parseAst';
+import { isAbsolute, join } from './utils/path';
+import type { PluginDriver } from './utils/PluginDriver';
+import { renderChunks } from './utils/renderChunks';
 import { timeEnd, timeStart } from './utils/timers';
+import {
+	URL_OUTPUT_AMD_ID,
+	URL_OUTPUT_DIR,
+	URL_OUTPUT_FORMAT,
+	URL_OUTPUT_SOURCEMAPFILE
+} from './utils/urls';
 
 export default class Bundle {
-	private facadeChunkByModule = new Map<Module, Chunk>();
-	private includedNamespaces = new Set<Module>();
+	private readonly facadeChunkByModule = new Map<Module, Chunk>();
+	private readonly includedNamespaces = new Set<Module>();
 
 	constructor(
 		private readonly outputOptions: NormalizedOutputOptions,
-		private readonly unsetOptions: Set<string>,
+		private readonly unsetOptions: ReadonlySet<string>,
 		private readonly inputOptions: NormalizedInputOptions,
 		private readonly pluginDriver: PluginDriver,
 		private readonly graph: Graph
@@ -40,73 +54,72 @@ export default class Bundle {
 
 	async generate(isWrite: boolean): Promise<OutputBundle> {
 		timeStart('GENERATE', 1);
-		const outputBundle: OutputBundleWithPlaceholders = Object.create(null);
-		this.pluginDriver.setOutputBundle(
-			outputBundle,
-			this.outputOptions,
-			this.facadeChunkByModule
-		);
+		const outputBundleBase: OutputBundle = Object.create(null);
+		const outputBundle = getOutputBundle(outputBundleBase);
+		this.pluginDriver.setOutputBundle(outputBundle, this.outputOptions);
+
 		try {
+			timeStart('initialize render', 2);
+
 			await this.pluginDriver.hookParallel('renderStart', [this.outputOptions, this.inputOptions]);
 
+			timeEnd('initialize render', 2);
 			timeStart('generate chunks', 2);
-			const chunks = await this.generateChunks();
+
+			const getHashPlaceholder = getHashPlaceholderGenerator();
+			const chunks = await this.generateChunks(outputBundle, getHashPlaceholder);
 			if (chunks.length > 1) {
-				validateOptionsForMultiChunkOutput(this.outputOptions, this.inputOptions.onwarn);
+				validateOptionsForMultiChunkOutput(this.outputOptions, this.inputOptions.onLog);
 			}
-			const inputBase = commondir(getAbsoluteEntryModulePaths(chunks));
+			this.pluginDriver.setChunkInformation(this.facadeChunkByModule);
+			for (const chunk of chunks) {
+				chunk.generateExports();
+				chunk.inlineTransitiveImports();
+			}
+
 			timeEnd('generate chunks', 2);
 
-			timeStart('render modules', 2);
-
-			// We need to create addons before prerender because at the moment, there
-			// can be no async code between prerender and render due to internal state
-			const addons = await createAddons(this.outputOptions, this.pluginDriver);
-			this.prerenderChunks(chunks, inputBase);
-			timeEnd('render modules', 2);
-
-			await this.addFinalizedChunksToBundle(chunks, inputBase, addons, outputBundle);
-		} catch (error) {
-			await this.pluginDriver.hookParallel('renderError', [error]);
-			throw error;
+			await renderChunks(
+				chunks,
+				outputBundle,
+				this.pluginDriver,
+				this.outputOptions,
+				this.inputOptions.onLog
+			);
+		} catch (error_: any) {
+			try {
+				await this.pluginDriver.hookParallel('renderError', [error_]);
+			} catch (hookError: any) {
+				error(logErrorInHook(error_, hookError, 'renderError'));
+			}
+			throw error_;
 		}
+
+		removeUnreferencedAssets(outputBundle);
+
+		timeStart('generate bundle', 2);
+
 		await this.pluginDriver.hookSeq('generateBundle', [
 			this.outputOptions,
 			outputBundle as OutputBundle,
 			isWrite
 		]);
 		this.finaliseAssets(outputBundle);
+		validateOutputBundleFileNames(outputBundle);
 
+		timeEnd('generate bundle', 2);
 		timeEnd('GENERATE', 1);
-		return outputBundle as OutputBundle;
-	}
-
-	private async addFinalizedChunksToBundle(
-		chunks: Chunk[],
-		inputBase: string,
-		addons: Addons,
-		outputBundle: OutputBundleWithPlaceholders
-	): Promise<void> {
-		this.assignChunkIds(chunks, inputBase, addons, outputBundle);
-		for (const chunk of chunks) {
-			outputBundle[chunk.id!] = chunk.getChunkInfoWithFileNames() as OutputChunk;
-		}
-		await Promise.all(
-			chunks.map(async chunk => {
-				const outputChunk = outputBundle[chunk.id!] as OutputChunk;
-				Object.assign(outputChunk, await chunk.render(this.outputOptions, addons, outputChunk));
-			})
-		);
+		return outputBundleBase;
 	}
 
 	private async addManualChunks(
-		manualChunks: Record<string, string[]>
+		manualChunks: Record<string, readonly string[]>
 	): Promise<Map<Module, string>> {
 		const manualChunkAliasByEntry = new Map<Module, string>();
 		const chunkEntries = await Promise.all(
-			Object.keys(manualChunks).map(async alias => ({
+			Object.entries(manualChunks).map(async ([alias, files]) => ({
 				alias,
-				entries: await this.graph.moduleLoader.addAdditionalModules(manualChunks[alias])
+				entries: await this.graph.moduleLoader.addAdditionalModules(files, true)
 			}))
 		);
 		for (const { alias, entries } of chunkEntries) {
@@ -115,40 +128,6 @@ export default class Bundle {
 			}
 		}
 		return manualChunkAliasByEntry;
-	}
-
-	private assignChunkIds(
-		chunks: Chunk[],
-		inputBase: string,
-		addons: Addons,
-		bundle: OutputBundleWithPlaceholders
-	) {
-		const entryChunks: Chunk[] = [];
-		const otherChunks: Chunk[] = [];
-		for (const chunk of chunks) {
-			(chunk.facadeModule && chunk.facadeModule.isUserDefinedEntryPoint
-				? entryChunks
-				: otherChunks
-			).push(chunk);
-		}
-
-		// make sure entry chunk names take precedence with regard to deconflicting
-		const chunksForNaming: Chunk[] = entryChunks.concat(otherChunks);
-		for (const chunk of chunksForNaming) {
-			if (this.outputOptions.file) {
-				chunk.id = basename(this.outputOptions.file);
-			} else if (this.outputOptions.preserveModules) {
-				chunk.id = chunk.generateIdPreserveModules(
-					inputBase,
-					this.outputOptions,
-					bundle,
-					this.unsetOptions
-				);
-			} else {
-				chunk.id = chunk.generateId(addons, this.outputOptions, bundle, true);
-			}
-			bundle[chunk.id] = FILE_PLACEHOLDER;
-		}
 	}
 
 	private assignManualChunks(getManualChunk: GetManualChunk): Map<Module, string> {
@@ -168,47 +147,60 @@ export default class Bundle {
 		return manualChunkAliasByEntry;
 	}
 
-	private finaliseAssets(outputBundle: OutputBundleWithPlaceholders): void {
-		for (const key of Object.keys(outputBundle)) {
-			const file = outputBundle[key] as any;
-			if (!file.type) {
-				warnDeprecation(
-					'A plugin is directly adding properties to the bundle object in the "generateBundle" hook. This is deprecated and will be removed in a future Rollup version, please use "this.emitFile" instead.',
-					true,
-					this.inputOptions
-				);
-				file.type = 'asset';
-			}
-			if (this.outputOptions.validate && typeof file.code == 'string') {
-				try {
-					this.graph.contextParse(file.code, {
-						allowHashBang: true,
-						ecmaVersion: 'latest'
-					});
-				} catch (exception) {
-					this.inputOptions.onwarn(errChunkInvalid(file, exception));
+	private finaliseAssets(bundle: OutputBundleWithPlaceholders): void {
+		if (this.outputOptions.validate) {
+			for (const file of Object.values(bundle)) {
+				if ('code' in file) {
+					try {
+						parseAst(file.code, { jsx: this.inputOptions.jsx !== false });
+					} catch (error_: any) {
+						this.inputOptions.onLog(LOGLEVEL_WARN, logChunkInvalid(file, error_));
+					}
 				}
 			}
 		}
 		this.pluginDriver.finaliseAssets();
 	}
 
-	private async generateChunks(): Promise<Chunk[]> {
-		const { manualChunks } = this.outputOptions;
+	private async generateChunks(
+		bundle: OutputBundleWithPlaceholders,
+		getHashPlaceholder: HashPlaceholderGenerator
+	): Promise<Chunk[]> {
+		const {
+			experimentalMinChunkSize,
+			inlineDynamicImports,
+			manualChunks,
+			preserveModules,
+			onlyExplicitManualChunks
+		} = this.outputOptions;
 		const manualChunkAliasByEntry =
 			typeof manualChunks === 'object'
 				? await this.addManualChunks(manualChunks)
 				: this.assignManualChunks(manualChunks);
-		const chunks: Chunk[] = [];
+		const snippets = getGenerateCodeSnippets(this.outputOptions);
+		const includedModules = getIncludedModules(this.graph.modulesById);
+		const inputBase = commondir(getAbsoluteEntryModulePaths(includedModules, preserveModules));
+		const externalChunkByModule = getExternalChunkByModule(
+			this.graph.modulesById,
+			this.outputOptions,
+			inputBase
+		);
+		const executableModule = inlineDynamicImports
+			? [{ alias: null, modules: includedModules }]
+			: preserveModules
+				? includedModules.map(module => ({ alias: null, modules: [module] }))
+				: getChunkAssignments(
+						this.graph.entryModules,
+						manualChunkAliasByEntry,
+						experimentalMinChunkSize,
+						this.inputOptions.onLog,
+						typeof manualChunks === 'function',
+						onlyExplicitManualChunks
+					);
+		const chunks: Chunk[] = new Array(executableModule.length);
 		const chunkByModule = new Map<Module, Chunk>();
-		for (const { alias, modules } of this.outputOptions.inlineDynamicImports
-			? [{ alias: null, modules: getIncludedModules(this.graph.modulesById) }]
-			: this.outputOptions.preserveModules
-			? getIncludedModules(this.graph.modulesById).map(module => ({
-					alias: null,
-					modules: [module]
-			  }))
-			: getChunkAssignments(this.graph.entryModules, manualChunkAliasByEntry)) {
+		let index = 0;
+		for (const { alias, modules } of executableModule) {
 			sortByExecutionOrder(modules);
 			const chunk = new Chunk(
 				modules,
@@ -218,18 +210,25 @@ export default class Bundle {
 				this.pluginDriver,
 				this.graph.modulesById,
 				chunkByModule,
+				externalChunkByModule,
 				this.facadeChunkByModule,
 				this.includedNamespaces,
-				alias
+				alias,
+				getHashPlaceholder,
+				bundle,
+				inputBase,
+				snippets
 			);
-			chunks.push(chunk);
-			for (const module of modules) {
-				chunkByModule.set(module, chunk);
-			}
+			chunks[index++] = chunk;
 		}
 		for (const chunk of chunks) {
 			chunk.link();
 		}
+
+		if (!inlineDynamicImports && !preserveModules) {
+			this.checkCircularChunks(chunks);
+		}
+
 		const facades: Chunk[] = [];
 		for (const chunk of chunks) {
 			facades.push(...chunk.generateFacades());
@@ -237,73 +236,169 @@ export default class Bundle {
 		return [...chunks, ...facades];
 	}
 
-	private prerenderChunks(chunks: Chunk[], inputBase: string): void {
+	private checkCircularChunks(chunks: Chunk[]): void {
+		const visited = new Set<Chunk>();
+		const parents = new Map<Chunk, Chunk>();
+
+		const handleDependency = (chunk: Chunk, parent: Chunk): void => {
+			if (parents.has(chunk)) {
+				if (!visited.has(chunk)) {
+					const path = [chunk.getChunkName()];
+					let isManualChunkConflict = chunk.isManualChunk;
+					let nextChunk: Chunk | undefined = parent;
+					while (nextChunk !== chunk && nextChunk) {
+						path.push(nextChunk.getChunkName());
+						isManualChunkConflict &&= nextChunk.isManualChunk;
+						nextChunk = parents.get(nextChunk);
+					}
+					path.push(path[0]);
+					path.reverse();
+					this.inputOptions.onLog(LOGLEVEL_WARN, logCircularChunk(path, isManualChunkConflict));
+				}
+				return;
+			}
+			parents.set(chunk, parent);
+			analyseChunk(chunk);
+		};
+
+		const analyseChunk = (chunk: Chunk): void => {
+			for (const dependency of chunk.dependencies) {
+				if (dependency instanceof Chunk) {
+					handleDependency(dependency, chunk);
+				}
+			}
+			visited.add(chunk);
+		};
+
 		for (const chunk of chunks) {
-			chunk.generateExports();
-		}
-		for (const chunk of chunks) {
-			chunk.preRender(this.outputOptions, inputBase);
+			if (!parents.has(chunk)) {
+				analyseChunk(chunk);
+			}
 		}
 	}
 }
 
-function getAbsoluteEntryModulePaths(chunks: Chunk[]): string[] {
+function validateOptionsForMultiChunkOutput(
+	outputOptions: NormalizedOutputOptions,
+	log: LogHandler
+) {
+	if (outputOptions.format === 'umd' || outputOptions.format === 'iife')
+		return error(
+			logInvalidOption(
+				'output.format',
+				URL_OUTPUT_FORMAT,
+				'UMD and IIFE output formats are not supported for code-splitting builds',
+				outputOptions.format
+			)
+		);
+	if (typeof outputOptions.file === 'string')
+		return error(
+			logInvalidOption(
+				'output.file',
+				URL_OUTPUT_DIR,
+				'when building multiple chunks, the "output.dir" option must be used, not "output.file". To inline dynamic imports, set the "inlineDynamicImports" option'
+			)
+		);
+	if (outputOptions.sourcemapFile)
+		return error(
+			logInvalidOption(
+				'output.sourcemapFile',
+				URL_OUTPUT_SOURCEMAPFILE,
+				'"output.sourcemapFile" is only supported for single-file builds'
+			)
+		);
+	if (!outputOptions.amd.autoId && outputOptions.amd.id)
+		log(
+			LOGLEVEL_WARN,
+			logInvalidOption(
+				'output.amd.id',
+				URL_OUTPUT_AMD_ID,
+				'this option is only properly supported for single-file builds. Use "output.amd.autoId" and "output.amd.basePath" instead'
+			)
+		);
+}
+
+function getIncludedModules(modulesById: ReadonlyMap<string, Module | ExternalModule>): Module[] {
+	const includedModules: Module[] = [];
+	for (const module of modulesById.values()) {
+		if (
+			module instanceof Module &&
+			(module.isIncluded() || module.info.isEntry || module.includedDynamicImporters.length > 0)
+		) {
+			includedModules.push(module);
+		}
+	}
+	return includedModules;
+}
+
+function getAbsoluteEntryModulePaths(
+	includedModules: readonly Module[],
+	preserveModules: boolean
+): string[] {
 	const absoluteEntryModulePaths: string[] = [];
-	for (const chunk of chunks) {
-		for (const entryModule of chunk.entryModules) {
-			if (isAbsolute(entryModule.id)) {
-				absoluteEntryModulePaths.push(entryModule.id);
-			}
+	for (const module of includedModules) {
+		if ((module.info.isEntry || preserveModules) && isAbsolute(module.id)) {
+			absoluteEntryModulePaths.push(module.id);
 		}
 	}
 	return absoluteEntryModulePaths;
 }
 
-function validateOptionsForMultiChunkOutput(
+function getExternalChunkByModule(
+	modulesById: ReadonlyMap<string, Module | ExternalModule>,
 	outputOptions: NormalizedOutputOptions,
-	onWarn: WarningHandler
-) {
-	if (outputOptions.format === 'umd' || outputOptions.format === 'iife')
-		return error({
-			code: 'INVALID_OPTION',
-			message: 'UMD and IIFE output formats are not supported for code-splitting builds.'
-		});
-	if (typeof outputOptions.file === 'string')
-		return error({
-			code: 'INVALID_OPTION',
-			message:
-				'When building multiple chunks, the "output.dir" option must be used, not "output.file". ' +
-				'To inline dynamic imports, set the "inlineDynamicImports" option.'
-		});
-	if (outputOptions.sourcemapFile)
-		return error({
-			code: 'INVALID_OPTION',
-			message: '"output.sourcemapFile" is only supported for single-file builds.'
-		});
-	if (!outputOptions.amd.autoId && outputOptions.amd.id)
-		onWarn({
-			code: 'INVALID_OPTION',
-			message:
-				'"output.amd.id" is only properly supported for single-file builds. Use "output.amd.autoId" and "output.amd.basePath".'
-		});
-}
-
-function getIncludedModules(modulesById: Map<string, Module | ExternalModule>): Module[] {
-	return [...modulesById.values()].filter(
-		module =>
-			module instanceof Module &&
-			(module.isIncluded() || module.info.isEntry || module.includedDynamicImporters.length > 0)
-	) as Module[];
+	inputBase: string
+): Map<ExternalModule, ExternalChunk> {
+	const externalChunkByModule = new Map<ExternalModule, ExternalChunk>();
+	for (const module of modulesById.values()) {
+		if (module instanceof ExternalModule) {
+			externalChunkByModule.set(module, new ExternalChunk(module, outputOptions, inputBase));
+		}
+	}
+	return externalChunkByModule;
 }
 
 function addModuleToManualChunk(
 	alias: string,
 	module: Module,
 	manualChunkAliasByEntry: Map<Module, string>
-) {
+): void {
 	const existingAlias = manualChunkAliasByEntry.get(module);
 	if (typeof existingAlias === 'string' && existingAlias !== alias) {
-		return error(errCannotAssignModuleToChunk(module.id, alias, existingAlias));
+		return error(logCannotAssignModuleToChunk(module.id, alias, existingAlias));
 	}
 	manualChunkAliasByEntry.set(module, alias);
+}
+
+const WINDOWS_DRIVE_LETTER_PREFIX_REGEX = /^[a-z]:/i;
+
+function isFileNameOutsideOutputDirectory(fileName: string): boolean {
+	// A leading drive letter makes the path drive-relative on Windows, where it
+	// is resolved against the current directory of that drive.
+	if (WINDOWS_DRIVE_LETTER_PREFIX_REGEX.test(fileName)) {
+		return true;
+	}
+	// Use join() to normalize ".." segments, then replace backslashes so the
+	// string checks below work identically on Windows and POSIX.
+	const normalized = join(fileName).replaceAll('\\', '/');
+	return (
+		normalized === '..' ||
+		normalized.startsWith('../') ||
+		normalized === '.' ||
+		isAbsolute(normalized)
+	);
+}
+
+function validateOutputBundleFileNames(bundle: OutputBundleWithPlaceholders): void {
+	for (const [bundleKey, entry] of Object.entries(bundle)) {
+		if (isFileNameOutsideOutputDirectory(bundleKey)) {
+			return error(logFileNameOutsideOutputDirectory(bundleKey));
+		}
+		if (entry.type !== 'placeholder') {
+			const { fileName } = entry;
+			if (fileName !== bundleKey && isFileNameOutsideOutputDirectory(fileName)) {
+				return error(logFileNameOutsideOutputDirectory(fileName));
+			}
+		}
+	}
 }

@@ -1,15 +1,15 @@
-const assert = require('assert');
-const terser = require('terser');
-const MagicString = require('magic-string');
-const getLocation = require('../../getLocation');
+const assert = require('node:assert');
 const { SourceMapConsumer } = require('source-map');
+const terser = require('terser');
+const getLocation = require('../../getLocation');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'names are recovered if transforms are used',
 	options: {
 		plugins: [
 			{
-				transform(code) {
+				async transform(code) {
+					const { default: MagicString } = await import('magic-string');
 					const s = new MagicString(code);
 					const pattern = /mangleMe/g;
 					let match;
@@ -59,4 +59,4 @@ module.exports = {
 			name: 'mangleMe'
 		});
 	}
-};
+});

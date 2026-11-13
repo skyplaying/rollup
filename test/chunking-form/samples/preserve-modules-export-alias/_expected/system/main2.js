@@ -1,13 +1,13 @@
-System.register(['./dep.js'], function (exports) {
+System.register(['./dep.js'], (function (exports) {
 	'use strict';
 	return {
 		setters: [function (module) {
-			exports('bar', module.foo);
+			exports("bar", module.bar);
 		}],
-		execute: function () {
+		execute: (function () {
 
 
 
-		}
+		})
 	};
-});
+}));

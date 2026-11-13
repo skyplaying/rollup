@@ -1,11 +1,8 @@
-define(['../custom_modules/@my-scope/my-base-pkg/index', '../_virtual/index.js_commonjs-exports'], function (index$1, index) { 'use strict';
+define(['../_virtual/_commonjsHelpers', './module2'], (function (_commonjsHelpers, module$2) { 'use strict';
 
-  const base2 = index.__exports;
+	var moduleExports = module$2.__require();
+	var module$1 = /*@__PURE__*/_commonjsHelpers.getDefaultExportFromCjs(moduleExports);
 
-  var module = {
-    base2,
-  };
+	return module$1;
 
-  return module;
-
-});
+}));

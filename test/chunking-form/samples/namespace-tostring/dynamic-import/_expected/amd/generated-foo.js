@@ -1,9 +1,9 @@
-define(['exports'], function (exports) { 'use strict';
+define(['exports'], (function (exports) { 'use strict';
 
 	const bar = 42;
 
 	exports.bar = bar;
 
-	exports[Symbol.toStringTag] = 'Module';
+	Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
 
-});
+}));

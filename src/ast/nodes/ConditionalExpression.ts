@@ -1,176 +1,235 @@
-import MagicString from 'magic-string';
-import { BLANK } from '../../utils/blank';
+import type MagicString from 'magic-string';
+import { BLANK, EMPTY_ARRAY } from '../../utils/blank';
+import type { NodeRenderOptions, RenderOptions } from '../../utils/renderHelpers';
 import {
 	findFirstOccurrenceOutsideComment,
 	findNonWhiteSpace,
-	NodeRenderOptions,
-	removeLineBreaks,
-	RenderOptions
+	removeLineBreaks
 } from '../../utils/renderHelpers';
-import { removeAnnotations } from '../../utils/treeshakeNode';
-import { CallOptions } from '../CallOptions';
-import { DeoptimizableEntity } from '../DeoptimizableEntity';
-import { HasEffectsContext, InclusionContext } from '../ExecutionContext';
+import type { DeoptimizableEntity } from '../DeoptimizableEntity';
+import type { HasEffectsContext, InclusionContext } from '../ExecutionContext';
+import { createInclusionContext } from '../ExecutionContext';
+import type { NodeInteraction, NodeInteractionCalled } from '../NodeInteractions';
+import type { EntityPathTracker, ObjectPath } from '../utils/PathTracker';
+import { EMPTY_PATH, SHARED_RECURSION_TRACKER, UNKNOWN_PATH } from '../utils/PathTracker';
+import { tryCastLiteralValueToBoolean } from '../utils/tryCastLiteralValueToBoolean';
+import type * as NodeType from './NodeType';
+import { Flag, isFlagSet, setFlag } from './shared/BitFlags';
+import type { ExpressionEntity, LiteralValueOrUnknown } from './shared/Expression';
 import {
-	EMPTY_PATH,
-	ObjectPath,
-	PathTracker,
-	SHARED_RECURSION_TRACKER,
-	UNKNOWN_PATH
-} from '../utils/PathTracker';
-import { LiteralValueOrUnknown, UnknownValue } from '../values';
-import CallExpression from './CallExpression';
-import * as NodeType from './NodeType';
-import { ExpressionEntity } from './shared/Expression';
+	includeInteraction,
+	UnknownFalsyValue,
+	UnknownTruthyValue,
+	UnknownValue
+} from './shared/Expression';
 import { MultiExpression } from './shared/MultiExpression';
-import { ExpressionNode, IncludeChildren, NodeBase } from './shared/Node';
-import SpreadElement from './SpreadElement';
+import type { ExpressionNode, IncludeChildren } from './shared/Node';
+import { doNotDeoptimize, NodeBase, onlyIncludeSelfNoDeoptimize } from './shared/Node';
 
 export default class ConditionalExpression extends NodeBase implements DeoptimizableEntity {
-	alternate!: ExpressionNode;
-	consequent!: ExpressionNode;
-	test!: ExpressionNode;
-	type!: NodeType.tConditionalExpression;
+	declare alternate: ExpressionNode;
+	declare consequent: ExpressionNode;
+	declare test: ExpressionNode;
+	declare type: NodeType.tConditionalExpression;
 
-	private expressionsToBeDeoptimized: DeoptimizableEntity[] = [];
-	private isBranchResolutionAnalysed = false;
-	private usedBranch: ExpressionNode | null = null;
-	private wasPathDeoptimizedWhileOptimized = false;
-
-	bind() {
-		super.bind();
-		// ensure the usedBranch is set for the tree-shaking passes
-		this.getUsedBranch();
+	get isBranchResolutionAnalysed(): boolean {
+		return isFlagSet(this.flags, Flag.isBranchResolutionAnalysed);
+	}
+	set isBranchResolutionAnalysed(value: boolean) {
+		this.flags = setFlag(this.flags, Flag.isBranchResolutionAnalysed, value);
 	}
 
-	deoptimizeCache() {
+	private get hasDeoptimizedCache(): boolean {
+		return isFlagSet(this.flags, Flag.hasDeoptimizedCache);
+	}
+	private set hasDeoptimizedCache(value: boolean) {
+		this.flags = setFlag(this.flags, Flag.hasDeoptimizedCache, value);
+	}
+
+	private expressionsToBeDeoptimized: DeoptimizableEntity[] = [];
+	private usedBranch: ExpressionNode | null = null;
+
+	deoptimizeArgumentsOnInteractionAtPath(
+		interaction: NodeInteraction,
+		path: ObjectPath,
+		recursionTracker: EntityPathTracker
+	): void {
+		this.consequent.deoptimizeArgumentsOnInteractionAtPath(interaction, path, recursionTracker);
+		this.alternate.deoptimizeArgumentsOnInteractionAtPath(interaction, path, recursionTracker);
+	}
+
+	deoptimizeCache(): void {
+		if (this.hasDeoptimizedCache) return;
+		this.hasDeoptimizedCache = true;
 		if (this.usedBranch !== null) {
 			const unusedBranch = this.usedBranch === this.consequent ? this.alternate : this.consequent;
 			this.usedBranch = null;
-			const expressionsToBeDeoptimized = this.expressionsToBeDeoptimized;
-			this.expressionsToBeDeoptimized = [];
-			if (this.wasPathDeoptimizedWhileOptimized) {
-				unusedBranch.deoptimizePath(UNKNOWN_PATH);
+			unusedBranch.deoptimizePath(UNKNOWN_PATH);
+			if (this.included) {
+				unusedBranch.includePath(UNKNOWN_PATH, createInclusionContext());
 			}
+			const { expressionsToBeDeoptimized } = this;
+			this.expressionsToBeDeoptimized = EMPTY_ARRAY as unknown as DeoptimizableEntity[];
 			for (const expression of expressionsToBeDeoptimized) {
 				expression.deoptimizeCache();
 			}
 		}
 	}
 
-	deoptimizePath(path: ObjectPath) {
-		if (path.length > 0) {
-			const usedBranch = this.getUsedBranch();
-			if (usedBranch === null) {
-				this.consequent.deoptimizePath(path);
-				this.alternate.deoptimizePath(path);
-			} else {
-				this.wasPathDeoptimizedWhileOptimized = true;
-				usedBranch.deoptimizePath(path);
-			}
+	deoptimizePath(path: ObjectPath): void {
+		const usedBranch = this.getUsedBranch();
+		if (usedBranch) {
+			usedBranch.deoptimizePath(path);
+		} else {
+			this.consequent.deoptimizePath(path);
+			this.alternate.deoptimizePath(path);
 		}
 	}
 
 	getLiteralValueAtPath(
 		path: ObjectPath,
-		recursionTracker: PathTracker,
+		recursionTracker: EntityPathTracker,
 		origin: DeoptimizableEntity
 	): LiteralValueOrUnknown {
 		const usedBranch = this.getUsedBranch();
-		if (usedBranch === null) return UnknownValue;
+		if (!usedBranch) {
+			if (this.hasDeoptimizedCache) {
+				return UnknownValue;
+			}
+			const consequentValue = this.consequent.getLiteralValueAtPath(path, recursionTracker, origin);
+			const castedConsequentValue = tryCastLiteralValueToBoolean(consequentValue);
+			if (castedConsequentValue === UnknownValue) return UnknownValue;
+			const alternateValue = this.alternate.getLiteralValueAtPath(path, recursionTracker, origin);
+			const castedAlternateValue = tryCastLiteralValueToBoolean(alternateValue);
+			if (castedConsequentValue !== castedAlternateValue) return UnknownValue;
+			this.expressionsToBeDeoptimized.push(origin);
+			if (consequentValue !== alternateValue)
+				return castedConsequentValue ? UnknownTruthyValue : UnknownFalsyValue;
+			return consequentValue;
+		}
 		this.expressionsToBeDeoptimized.push(origin);
 		return usedBranch.getLiteralValueAtPath(path, recursionTracker, origin);
 	}
 
 	getReturnExpressionWhenCalledAtPath(
 		path: ObjectPath,
-		recursionTracker: PathTracker,
+		interaction: NodeInteractionCalled,
+		recursionTracker: EntityPathTracker,
 		origin: DeoptimizableEntity
-	): ExpressionEntity {
+	): [expression: ExpressionEntity, isPure: boolean] {
 		const usedBranch = this.getUsedBranch();
-		if (usedBranch === null)
-			return new MultiExpression([
-				this.consequent.getReturnExpressionWhenCalledAtPath(path, recursionTracker, origin),
-				this.alternate.getReturnExpressionWhenCalledAtPath(path, recursionTracker, origin)
-			]);
+		if (!usedBranch)
+			return [
+				new MultiExpression([
+					this.consequent.getReturnExpressionWhenCalledAtPath(
+						path,
+						interaction,
+						recursionTracker,
+						origin
+					)[0],
+					this.alternate.getReturnExpressionWhenCalledAtPath(
+						path,
+						interaction,
+						recursionTracker,
+						origin
+					)[0]
+				]),
+				false
+			];
 		this.expressionsToBeDeoptimized.push(origin);
-		return usedBranch.getReturnExpressionWhenCalledAtPath(path, recursionTracker, origin);
+		return usedBranch.getReturnExpressionWhenCalledAtPath(
+			path,
+			interaction,
+			recursionTracker,
+			origin
+		);
 	}
 
 	hasEffects(context: HasEffectsContext): boolean {
 		if (this.test.hasEffects(context)) return true;
-		if (this.usedBranch === null) {
+		const usedBranch = this.getUsedBranch();
+		if (!usedBranch) {
 			return this.consequent.hasEffects(context) || this.alternate.hasEffects(context);
 		}
-		return this.usedBranch.hasEffects(context);
+		return usedBranch.hasEffects(context);
 	}
 
-	hasEffectsWhenAccessedAtPath(path: ObjectPath, context: HasEffectsContext): boolean {
-		if (path.length === 0) return false;
-		if (this.usedBranch === null) {
-			return (
-				this.consequent.hasEffectsWhenAccessedAtPath(path, context) ||
-				this.alternate.hasEffectsWhenAccessedAtPath(path, context)
-			);
-		}
-		return this.usedBranch.hasEffectsWhenAccessedAtPath(path, context);
-	}
-
-	hasEffectsWhenAssignedAtPath(path: ObjectPath, context: HasEffectsContext): boolean {
-		if (path.length === 0) return true;
-		if (this.usedBranch === null) {
-			return (
-				this.consequent.hasEffectsWhenAssignedAtPath(path, context) ||
-				this.alternate.hasEffectsWhenAssignedAtPath(path, context)
-			);
-		}
-		return this.usedBranch.hasEffectsWhenAssignedAtPath(path, context);
-	}
-
-	hasEffectsWhenCalledAtPath(
+	hasEffectsOnInteractionAtPath(
 		path: ObjectPath,
-		callOptions: CallOptions,
+		interaction: NodeInteraction,
 		context: HasEffectsContext
 	): boolean {
-		if (this.usedBranch === null) {
+		const usedBranch = this.getUsedBranch();
+		if (!usedBranch) {
 			return (
-				this.consequent.hasEffectsWhenCalledAtPath(path, callOptions, context) ||
-				this.alternate.hasEffectsWhenCalledAtPath(path, callOptions, context)
+				this.consequent.hasEffectsOnInteractionAtPath(path, interaction, context) ||
+				this.alternate.hasEffectsOnInteractionAtPath(path, interaction, context)
 			);
 		}
-		return this.usedBranch.hasEffectsWhenCalledAtPath(path, callOptions, context);
+		return usedBranch.hasEffectsOnInteractionAtPath(path, interaction, context);
 	}
 
-	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren) {
+	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren): void {
 		this.included = true;
-		if (
-			includeChildrenRecursively ||
-			this.test.shouldBeIncluded(context) ||
-			this.usedBranch === null
-		) {
+		const usedBranch = this.getUsedBranch();
+		if (usedBranch === null || includeChildrenRecursively || this.test.shouldBeIncluded(context)) {
 			this.test.include(context, includeChildrenRecursively);
 			this.consequent.include(context, includeChildrenRecursively);
 			this.alternate.include(context, includeChildrenRecursively);
 		} else {
-			this.usedBranch.include(context, includeChildrenRecursively);
+			usedBranch.include(context, includeChildrenRecursively);
 		}
 	}
 
-	includeCallArguments(context: InclusionContext, args: (ExpressionNode | SpreadElement)[]): void {
-		if (this.usedBranch === null) {
-			this.consequent.includeCallArguments(context, args);
-			this.alternate.includeCallArguments(context, args);
+	includePath(path: ObjectPath, context: InclusionContext): void {
+		this.included = true;
+		const usedBranch = this.getUsedBranch();
+		if (usedBranch === null || this.test.shouldBeIncluded(context)) {
+			this.consequent.includePath(path, context);
+			this.alternate.includePath(path, context);
 		} else {
-			this.usedBranch.includeCallArguments(context, args);
+			usedBranch.includePath(path, context);
 		}
+	}
+
+	includeCallArgumentsWhenCalledAtPath(
+		path: ObjectPath,
+		interaction: NodeInteractionCalled,
+		context: InclusionContext
+	): void {
+		if (path.length === 0) {
+			const usedBranch = this.getUsedBranch();
+			if (usedBranch) {
+				usedBranch.includeCallArgumentsWhenCalledAtPath(EMPTY_PATH, interaction, context);
+			} else {
+				this.consequent.includeCallArgumentsWhenCalledAtPath(EMPTY_PATH, interaction, context);
+				this.alternate.includeCallArgumentsWhenCalledAtPath(EMPTY_PATH, interaction, context);
+			}
+		} else {
+			includeInteraction(interaction, context);
+		}
+	}
+
+	removeAnnotations(code: MagicString) {
+		this.test.removeAnnotations(code);
 	}
 
 	render(
 		code: MagicString,
 		options: RenderOptions,
-		{ renderedParentType, isCalleeOfRenderedParent, preventASI }: NodeRenderOptions = BLANK
-	) {
-		if (!this.test.included) {
+		{
+			isCalleeOfRenderedParent,
+			preventASI,
+			renderedParentType,
+			renderedSurroundingElement
+		}: NodeRenderOptions = BLANK
+	): void {
+		if (this.test.included) {
+			this.test.render(code, options, { renderedSurroundingElement });
+			this.consequent.render(code, options);
+			this.alternate.render(code, options);
+		} else {
+			const usedBranch = this.getUsedBranch();
 			const colonPos = findFirstOccurrenceOutsideComment(code.original, ':', this.consequent.end);
 			const inclusionStart = findNonWhiteSpace(
 				code.original,
@@ -179,22 +238,19 @@ export default class ConditionalExpression extends NodeBase implements Deoptimiz
 					: colonPos) + 1
 			);
 			if (preventASI) {
-				removeLineBreaks(code, inclusionStart, this.usedBranch!.start);
+				removeLineBreaks(code, inclusionStart, usedBranch!.start);
 			}
 			code.remove(this.start, inclusionStart);
 			if (this.consequent.included) {
 				code.remove(colonPos, this.end);
 			}
-			removeAnnotations(this, code);
-			this.usedBranch!.render(code, options, {
-				isCalleeOfRenderedParent: renderedParentType
-					? isCalleeOfRenderedParent
-					: (this.parent as CallExpression).callee === this,
+			this.test.removeAnnotations(code);
+			usedBranch!.render(code, options, {
+				isCalleeOfRenderedParent,
 				preventASI: true,
-				renderedParentType: renderedParentType || this.parent.type
+				renderedParentType: renderedParentType || this.parent.type,
+				renderedSurroundingElement: renderedSurroundingElement || this.parent.type
 			});
-		} else {
-			super.render(code, options);
 		}
 	}
 
@@ -203,9 +259,14 @@ export default class ConditionalExpression extends NodeBase implements Deoptimiz
 			return this.usedBranch;
 		}
 		this.isBranchResolutionAnalysed = true;
-		const testValue = this.test.getLiteralValueAtPath(EMPTY_PATH, SHARED_RECURSION_TRACKER, this);
-		return testValue === UnknownValue
+		const testValue = tryCastLiteralValueToBoolean(
+			this.test.getLiteralValueAtPath(EMPTY_PATH, SHARED_RECURSION_TRACKER, this)
+		);
+		return typeof testValue === 'symbol'
 			? null
 			: (this.usedBranch = testValue ? this.consequent : this.alternate);
 	}
 }
+
+ConditionalExpression.prototype.includeNode = onlyIncludeSelfNoDeoptimize;
+ConditionalExpression.prototype.applyDeoptimizations = doNotDeoptimize;

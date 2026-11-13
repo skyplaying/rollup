@@ -1,22 +1,29 @@
-import MagicString from 'magic-string';
+import type MagicString from 'magic-string';
 import {
 	findFirstOccurrenceOutsideComment,
-	NodeRenderOptions,
-	RenderOptions,
+	type NodeRenderOptions,
+	type RenderOptions,
 	renderStatementList
 } from '../../utils/renderHelpers';
-import { HasEffectsContext, InclusionContext } from '../ExecutionContext';
-import * as NodeType from './NodeType';
-import { ExpressionNode, IncludeChildren, NodeBase, StatementNode } from './shared/Node';
+import type { HasEffectsContext, InclusionContext } from '../ExecutionContext';
+import type * as NodeType from './NodeType';
+import {
+	doNotDeoptimize,
+	type ExpressionNode,
+	type IncludeChildren,
+	NodeBase,
+	onlyIncludeSelfNoDeoptimize,
+	type StatementNode
+} from './shared/Node';
 
 export default class SwitchCase extends NodeBase {
-	consequent!: StatementNode[];
-	needsBoundaries!: true;
-	test!: ExpressionNode | null;
-	type!: NodeType.tSwitchCase;
+	declare consequent: readonly StatementNode[];
+	declare needsBoundaries: true;
+	declare test: ExpressionNode | null;
+	declare type: NodeType.tSwitchCase;
 
 	hasEffects(context: HasEffectsContext): boolean {
-		if (this.test && this.test.hasEffects(context)) return true;
+		if (this.test?.hasEffects(context)) return true;
 		for (const node of this.consequent) {
 			if (context.brokenFlow) break;
 			if (node.hasEffects(context)) return true;
@@ -24,27 +31,32 @@ export default class SwitchCase extends NodeBase {
 		return false;
 	}
 
-	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren) {
+	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren): void {
 		this.included = true;
-		if (this.test) this.test.include(context, includeChildrenRecursively);
+		this.test?.include(context, includeChildrenRecursively);
 		for (const node of this.consequent) {
 			if (includeChildrenRecursively || node.shouldBeIncluded(context))
 				node.include(context, includeChildrenRecursively);
 		}
 	}
 
-	render(code: MagicString, options: RenderOptions, nodeRenderOptions?: NodeRenderOptions) {
-		if (this.consequent.length) {
-			this.test && this.test.render(code, options);
+	render(code: MagicString, options: RenderOptions, nodeRenderOptions?: NodeRenderOptions): void {
+		if (this.test) {
+			this.test.render(code, options);
+			if (this.test.start === this.start + 4) {
+				code.prependLeft(this.test.start, ' ');
+			}
+		}
+		if (this.consequent.length > 0) {
 			const testEnd = this.test
 				? this.test.end
 				: findFirstOccurrenceOutsideComment(code.original, 'default', this.start) + 7;
 			const consequentStart = findFirstOccurrenceOutsideComment(code.original, ':', testEnd) + 1;
 			renderStatementList(this.consequent, code, consequentStart, nodeRenderOptions!.end!, options);
-		} else {
-			super.render(code, options);
 		}
 	}
 }
 
 SwitchCase.prototype.needsBoundaries = true;
+SwitchCase.prototype.includeNode = onlyIncludeSelfNoDeoptimize;
+SwitchCase.prototype.applyDeoptimizations = doNotDeoptimize;

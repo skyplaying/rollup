@@ -1,25 +1,26 @@
-const fs = require('fs');
-const path = require('path');
+const { unlinkSync } = require('node:fs');
+const path = require('node:path');
+const { atomicWriteFileSync } = require('../../../testHelpers');
 
 let second;
 let third;
 
-module.exports = {
+module.exports = defineTest({
 	description: 'waits for multiple named bundle inputs',
-	command: 'rollup -c --waitForBundleInput',
+	spawnArgs: ['-c', '--waitForBundleInput'],
 	before() {
 		second = path.resolve(__dirname, 'second.js');
 		third = path.resolve(__dirname, 'third.js');
 	},
 	after() {
-		fs.unlinkSync(second);
-		fs.unlinkSync(third);
+		unlinkSync(second);
+		unlinkSync(third);
 	},
 	abortOnStderr(data) {
 		if (data.includes('waiting for input second')) {
-			fs.writeFileSync(second, "export default 'second'");
+			atomicWriteFileSync(second, "export default 'second'");
 		} else if (data.includes('waiting for input third')) {
-			fs.writeFileSync(third, "export default 'third'");
+			atomicWriteFileSync(third, "export default 'third'");
 		}
 	}
-};
+});

@@ -1,8 +1,8 @@
-const assert = require('assert');
-const path = require('path');
+const assert = require('node:assert');
+const path = require('node:path');
 const sideEffects = [];
 
-module.exports = {
+module.exports = defineTest({
 	description: 'handles setting moduleSideEffects in the load hook',
 	context: {
 		sideEffects
@@ -23,22 +23,24 @@ module.exports = {
 				return JSON.parse(id.split('-')[1]);
 			}
 		},
-		plugins: {
-			name: 'test-plugin',
-			resolveId(id) {
-				if (!path.isAbsolute(id)) {
-					return id;
-				}
-			},
-			load(id) {
-				if (!path.isAbsolute(id)) {
-					const moduleSideEffects = JSON.parse(id.split('-')[3]);
-					return {
-						code: `export const value = '${id}'; sideEffects.push(value);`,
-						moduleSideEffects
-					};
+		plugins: [
+			{
+				name: 'test-plugin',
+				resolveId(id) {
+					if (!path.isAbsolute(id)) {
+						return id;
+					}
+				},
+				load(id) {
+					if (!path.isAbsolute(id)) {
+						const moduleSideEffects = JSON.parse(id.split('-')[3]);
+						return {
+							code: `export const value = '${id}'; sideEffects.push(value);`,
+							moduleSideEffects
+						};
+					}
 				}
 			}
-		}
+		]
 	}
-};
+});

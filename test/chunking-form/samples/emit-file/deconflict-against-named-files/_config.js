@@ -1,6 +1,6 @@
-const { loader } = require('../../../../utils.js');
+const { loader } = require('../../../../testHelpers.js');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'deconflicts files against named files',
 	options: {
 		input: 'main',
@@ -44,4 +44,4 @@ module.exports = {
 			}
 		]
 	}
-};
+});

@@ -1,7 +1,7 @@
-const { loader } = require('../../../utils.js');
+const { loader } = require('../../../testHelpers.js');
 
-module.exports = {
-	description: 'bundles files for the browser',
+module.exports = defineTest({
+	description: 'supports hashes in the browser build',
 	options: {
 		input: ['main', 'dep'],
 		plugins: loader({
@@ -13,4 +13,4 @@ console.log(foo);`,
 			entryFileNames: '[name]-[hash].js'
 		}
 	}
-};
+});

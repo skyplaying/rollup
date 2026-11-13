@@ -1,14 +1,14 @@
-System.register([], function (exports, module) {
+System.register([], (function (exports, module) {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
-			exports('getA', getA);
+			exports("getA", getA);
 
 			function getA() {
 				return module.import('./chunks/generated-a.js');
 			}
 
-		}
+		})
 	};
-});
+}));

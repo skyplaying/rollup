@@ -1,41 +1,43 @@
-import MagicString from 'magic-string';
-import { RenderOptions } from '../../utils/renderHelpers';
+import type MagicString from 'magic-string';
+import type { RenderOptions } from '../../utils/renderHelpers';
+import { type HasEffectsContext, type InclusionContext } from '../ExecutionContext';
+import { UNKNOWN_PATH } from '../utils/PathTracker';
+import type * as NodeType from './NodeType';
+import { UNKNOWN_EXPRESSION } from './shared/Expression';
 import {
-	BROKEN_FLOW_ERROR_RETURN_LABEL,
-	HasEffectsContext,
-	InclusionContext
-} from '../ExecutionContext';
-import { UNKNOWN_EXPRESSION } from '../values';
-import * as NodeType from './NodeType';
-import { ExpressionNode, IncludeChildren, StatementBase } from './shared/Node';
+	doNotDeoptimize,
+	type ExpressionNode,
+	type IncludeChildren,
+	StatementBase
+} from './shared/Node';
 
 export default class ReturnStatement extends StatementBase {
-	argument!: ExpressionNode | null;
-	type!: NodeType.tReturnStatement;
+	declare argument: ExpressionNode | null;
+	declare type: NodeType.tReturnStatement;
 
-	hasEffects(context: HasEffectsContext) {
-		if (
-			!context.ignore.returnAwaitYield ||
-			(this.argument !== null && this.argument.hasEffects(context))
-		)
-			return true;
-		context.brokenFlow = BROKEN_FLOW_ERROR_RETURN_LABEL;
+	hasEffects(context: HasEffectsContext): boolean {
+		if (!context.ignore.returnYield || this.argument?.hasEffects(context)) return true;
+		context.brokenFlow = true;
 		return false;
 	}
 
-	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren) {
-		this.included = true;
-		if (this.argument) {
-			this.argument.include(context, includeChildrenRecursively);
-		}
-		context.brokenFlow = BROKEN_FLOW_ERROR_RETURN_LABEL;
+	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren): void {
+		if (!this.included) this.includeNode(context);
+		this.argument?.include(context, includeChildrenRecursively);
+		context.brokenFlow = true;
 	}
 
-	initialise() {
+	includeNode(context: InclusionContext) {
+		this.included = true;
+		this.argument?.includePath(UNKNOWN_PATH, context);
+	}
+
+	initialise(): void {
+		super.initialise();
 		this.scope.addReturnExpression(this.argument || UNKNOWN_EXPRESSION);
 	}
 
-	render(code: MagicString, options: RenderOptions) {
+	render(code: MagicString, options: RenderOptions): void {
 		if (this.argument) {
 			this.argument.render(code, options, { preventASI: true });
 			if (this.argument.start === this.start + 6 /* 'return'.length */) {
@@ -44,3 +46,5 @@ export default class ReturnStatement extends StatementBase {
 		}
 	}
 }
+
+ReturnStatement.prototype.applyDeoptimizations = doNotDeoptimize;

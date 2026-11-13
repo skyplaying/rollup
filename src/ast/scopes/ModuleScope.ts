@@ -1,51 +1,74 @@
-import { AstContext } from '../../Module';
-import { InternalModuleFormat } from '../../rollup/types';
-import ExportDefaultDeclaration from '../nodes/ExportDefaultDeclaration';
+import type { AstContext, ImportDescription } from '../../Module';
+import type { InternalModuleFormat } from '../../rollup/types';
+import { logRedeclarationError } from '../../utils/logs';
+import type ExportDefaultDeclaration from '../nodes/ExportDefaultDeclaration';
+import type Identifier from '../nodes/Identifier';
+import type { ExpressionEntity } from '../nodes/shared/Expression';
+import type { VariableKind } from '../nodes/shared/VariableKinds';
+import type { ObjectPath } from '../utils/PathTracker';
+import { EMPTY_PATH } from '../utils/PathTracker';
 import { UNDEFINED_EXPRESSION } from '../values';
 import ExportDefaultVariable from '../variables/ExportDefaultVariable';
 import GlobalVariable from '../variables/GlobalVariable';
 import LocalVariable from '../variables/LocalVariable';
-import Variable from '../variables/Variable';
+import type Variable from '../variables/Variable';
 import ChildScope from './ChildScope';
-import GlobalScope from './GlobalScope';
+import type GlobalScope from './GlobalScope';
 
 export default class ModuleScope extends ChildScope {
-	context: AstContext;
-	parent!: GlobalScope;
+	declare parent: GlobalScope;
 
-	constructor(parent: GlobalScope, context: AstContext) {
-		super(parent);
-		this.context = context;
-		this.variables.set('this', new LocalVariable('this', null, UNDEFINED_EXPRESSION, context));
+	constructor(
+		parent: GlobalScope,
+		context: AstContext,
+		private readonly importDescriptions: Map<string, ImportDescription>
+	) {
+		super(parent, context);
+		this.variables.set(
+			'this',
+			new LocalVariable('this', null, UNDEFINED_EXPRESSION, EMPTY_PATH, context, 'other')
+		);
+	}
+
+	addDeclaration(
+		identifier: Identifier,
+		context: AstContext,
+		init: ExpressionEntity,
+		destructuredInitPath: ObjectPath,
+		kind: VariableKind
+	): LocalVariable {
+		if (this.importDescriptions.has(identifier.name)) {
+			context.error(logRedeclarationError(identifier.name), identifier.start);
+		}
+		return super.addDeclaration(identifier, context, init, destructuredInitPath, kind);
 	}
 
 	addExportDefaultDeclaration(
-		name: string,
 		exportDefaultDeclaration: ExportDefaultDeclaration,
 		context: AstContext
 	): ExportDefaultVariable {
-		const variable = new ExportDefaultVariable(name, exportDefaultDeclaration, context);
+		const variable = new ExportDefaultVariable(exportDefaultDeclaration, context);
 		this.variables.set('default', variable);
 		return variable;
 	}
 
-	addNamespaceMemberAccess() {}
+	addNamespaceMemberAccess(): void {}
 
 	deconflict(
 		format: InternalModuleFormat,
-		exportNamesByVariable: Map<Variable, string[]>,
-		accessedGlobalsByScope: Map<ChildScope, Set<string>>
-	) {
+		exportNamesByVariable: ReadonlyMap<Variable, readonly string[]>,
+		accessedGlobalsByScope: ReadonlyMap<ChildScope, ReadonlySet<string>>
+	): void {
 		// all module level variables are already deconflicted when deconflicting the chunk
 		for (const scope of this.children)
 			scope.deconflict(format, exportNamesByVariable, accessedGlobalsByScope);
 	}
 
-	findLexicalBoundary() {
+	findLexicalBoundary(): this {
 		return this;
 	}
 
-	findVariable(name: string) {
+	findVariable(name: string): Variable {
 		const knownVariable = this.variables.get(name) || this.accessedOutsideVariables.get(name);
 		if (knownVariable) {
 			return knownVariable;

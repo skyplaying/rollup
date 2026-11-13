@@ -1,10 +1,8 @@
-define(['exports', './dep'], function (exports, dep) { 'use strict';
+define(['exports', './dep'], (function (exports, dep) { 'use strict';
 
 
 
-	exports.bar = dep.foo;
-	exports.foo = dep.foo;
+	exports.bar = dep.bar;
+	exports.foo = dep.bar;
 
-	Object.defineProperty(exports, '__esModule', { value: true });
-
-});
+}));

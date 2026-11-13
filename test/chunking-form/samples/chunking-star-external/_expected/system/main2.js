@@ -1,22 +1,28 @@
-System.register(['./generated-dep.js', 'external2', 'starexternal2'], function (exports) {
+System.register(['./generated-dep.js', 'starexternal2', 'external2'], (function (exports) {
 	'use strict';
-	var _starExcludes = { main: 1, default: 1, dep: 1, e: 1 };
+	var _starExcludes = {
+		__proto__: null,
+		main: 1,
+		default: 1,
+		dep: 1,
+		e: 1
+	};
 	return {
 		setters: [function (module) {
-			exports('dep', module.d);
+			exports("dep", module.d);
 		}, function (module) {
-			exports('e', module.e);
-		}, function (module) {
-			var _setter = {};
-			for (var _$p in module) {
-				if (!_starExcludes[_$p]) _setter[_$p] = module[_$p];
+			var setter = { __proto__: null };
+			for (var name in module) {
+				if (!_starExcludes[name]) setter[name] = module[name];
 			}
-			exports(_setter);
+			exports(setter);
+		}, function (module) {
+			exports("e", module.e);
 		}],
-		execute: function () {
+		execute: (function () {
 
-			var main = exports('main', '2');
+			var main = exports("main", '2');
 
-		}
+		})
 	};
-});
+}));

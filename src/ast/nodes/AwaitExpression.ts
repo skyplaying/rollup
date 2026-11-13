@@ -1,29 +1,44 @@
-import { HasEffectsContext, InclusionContext } from '../ExecutionContext';
-import ArrowFunctionExpression from './ArrowFunctionExpression';
-import * as NodeType from './NodeType';
-import FunctionNode from './shared/FunctionNode';
-import { ExpressionNode, IncludeChildren, Node, NodeBase } from './shared/Node';
+import type { InclusionContext } from '../ExecutionContext';
+import { markTopLevelAwait } from '../utils/markTopLevelAwait';
+import type { ObjectPath } from '../utils/PathTracker';
+import type * as NodeType from './NodeType';
+import { type ExpressionNode, type IncludeChildren, NodeBase } from './shared/Node';
 
 export default class AwaitExpression extends NodeBase {
-	argument!: ExpressionNode;
-	type!: NodeType.tAwaitExpression;
+	declare argument: ExpressionNode;
+	declare type: NodeType.tAwaitExpression;
 
-	hasEffects(context: HasEffectsContext) {
-		return !context.ignore.returnAwaitYield || this.argument.hasEffects(context);
+	deoptimizePath(path: ObjectPath) {
+		this.argument.deoptimizePath(path);
 	}
 
-	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren) {
-		if (!this.included) {
-			this.included = true;
-			checkTopLevelAwait: if (!this.context.usesTopLevelAwait) {
-				let parent = this.parent;
-				do {
-					if (parent instanceof FunctionNode || parent instanceof ArrowFunctionExpression)
-						break checkTopLevelAwait;
-				} while ((parent = (parent as Node).parent as Node));
-				this.context.usesTopLevelAwait = true;
-			}
-		}
+	hasEffects(): boolean {
+		if (!this.deoptimized) this.applyDeoptimizations();
+		return true;
+	}
+
+	initialise(): void {
+		super.initialise();
+		markTopLevelAwait(this);
+	}
+
+	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren): void {
+		if (!this.included) this.includeNode(context);
 		this.argument.include(context, includeChildrenRecursively);
 	}
+
+	includeNode(context: InclusionContext) {
+		this.included = true;
+		if (!this.deoptimized) this.applyDeoptimizations();
+		// Thenables need to be included
+		this.argument.includePath(THEN_PATH, context);
+	}
+
+	includePath(path: ObjectPath, context: InclusionContext): void {
+		if (!this.deoptimized) this.applyDeoptimizations();
+		if (!this.included) this.includeNode(context);
+		this.argument.includePath(path, context);
+	}
 }
+
+const THEN_PATH = ['then'];

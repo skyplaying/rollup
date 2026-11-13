@@ -1,11 +1,11 @@
-System.register(['./generated-dep2.js'], function (exports) {
+System.register(['./generated-dep2.js'], (function (exports) {
   'use strict';
   var fn$2;
   return {
     setters: [function (module) {
       fn$2 = module.f;
     }],
-    execute: function () {
+    execute: (function () {
 
       function fn$1 () {
         console.log('lib1 fn');
@@ -21,9 +21,9 @@ System.register(['./generated-dep2.js'], function (exports) {
           fn();
           fn$2();
         }
-      } exports('default', Main2);
+      } exports("default", Main2);
 
-    }
+    })
   };
-});
+}));
 //# sourceMappingURL=main2.js.map

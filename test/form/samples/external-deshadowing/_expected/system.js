@@ -1,4 +1,4 @@
-System.register('myBundle', ['a', 'b'], function (exports) {
+System.register('myBundle', ['a', 'b'], (function (exports) {
   'use strict';
   var Test$1, Test$2;
   return {
@@ -7,16 +7,16 @@ System.register('myBundle', ['a', 'b'], function (exports) {
     }, function (module) {
       Test$2 = module.default;
     }],
-    execute: function () {
+    execute: (function () {
 
-      const Test = exports('Test', () => {
+      const Test = exports("Test", () => {
         console.log(Test$1);
       });
 
-      const Test1 = exports('Test1', () => {
+      const Test1 = exports("Test1", () => {
         console.log(Test$2);
       });
 
-    }
+    })
   };
-});
+}));

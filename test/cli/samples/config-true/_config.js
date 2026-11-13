@@ -1,5 +1,5 @@
-module.exports = {
+module.exports = defineTest({
 	description: 'defaults to rollup.config.js',
-	command: 'rollup -c',
+	spawnArgs: ['-c', '--bundleConfigAsCjs'],
 	execute: true
-};
+});

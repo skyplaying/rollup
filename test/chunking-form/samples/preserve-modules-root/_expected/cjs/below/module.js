@@ -1,12 +1,9 @@
 'use strict';
 
-require('../custom_modules/@my-scope/my-base-pkg/index.js');
-var index = require('../_virtual/index.js_commonjs-exports');
+var _commonjsHelpers = require('../_virtual/_commonjsHelpers.js');
+var module$2 = require('./module2.js');
 
-const base2 = index.__exports;
-
-var module$1 = {
-  base2,
-};
+var moduleExports = module$2.__require();
+var module$1 = /*@__PURE__*/_commonjsHelpers.getDefaultExportFromCjs(moduleExports);
 
 module.exports = module$1;

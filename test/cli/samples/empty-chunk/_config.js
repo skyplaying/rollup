@@ -1,8 +1,8 @@
-const { assertIncludes } = require('../../../utils.js');
+const { assertIncludes } = require('../../../testHelpers.js');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'shows warning when chunk empty',
-	command: 'rollup -c',
+	spawnArgs: ['-c'],
 	error: () => true,
-	stderr: stderr => assertIncludes(stderr, '(!) Generated an empty chunk\nmain')
-};
+	stderr: stderr => assertIncludes(stderr, '(!) Generated an empty chunk\n"main"')
+});

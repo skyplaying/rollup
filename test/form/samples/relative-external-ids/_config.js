@@ -1,37 +1,49 @@
-const path = require('path');
+const path = require('node:path');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'relative external ids are absolutely resolved',
 	options: {
 		external(id) {
 			switch (id) {
-				case './optionDirect.js':
+				case './optionDirect.js': {
 					return true;
-				case './optionDirectNested.js':
+				}
+				case './optionDirectNested.js': {
 					return true;
-				case path.resolve(__dirname, 'optionIndirect.js'):
+				}
+				case path.resolve(__dirname, 'optionIndirect.js'): {
 					return true;
-				case path.resolve(__dirname, 'nested', 'optionIndirectNested.js'):
+				}
+				case path.resolve(__dirname, 'nested', 'optionIndirectNested.js'): {
 					return true;
-				default:
+				}
+				default: {
 					return false;
-			}
-		},
-		plugins: {
-			resolveId(id) {
-				switch (id) {
-					case './hook.js':
-						return false;
-					case './hookNested.js':
-						return false;
-					case 'resolved':
-						return { id: './resolved.js', external: true };
-					case 'resolvedNested':
-						return { id: './resolvedNested.js', external: true };
-					default:
-						return null;
 				}
 			}
-		}
+		},
+		plugins: [
+			{
+				resolveId(id) {
+					switch (id) {
+						case './hook.js': {
+							return false;
+						}
+						case './hookNested.js': {
+							return false;
+						}
+						case 'resolved': {
+							return { id: './resolved.js', external: true };
+						}
+						case 'resolvedNested': {
+							return { id: './resolvedNested.js', external: true };
+						}
+						default: {
+							return null;
+						}
+					}
+				}
+			}
+		]
 	}
-};
+});

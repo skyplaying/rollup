@@ -1,54 +1,283 @@
-import { getOrCreate } from '../../utils/getOrCreate';
-import { Entity } from '../Entity';
+import { EMPTY_OBJECT } from '../../utils/blank';
+import { getNewSet, getOrCreate } from '../../utils/getOrCreate';
+import type { Entity } from '../Entity';
+import type { InclusionContext } from '../ExecutionContext';
+import type { ExpressionEntity } from '../nodes/shared/Expression';
 
 export const UnknownKey = Symbol('Unknown Key');
-export type ObjectPathKey = string | typeof UnknownKey;
+export const UnknownNonAccessorKey = Symbol('Unknown Non-Accessor Key');
+export const UnknownInteger = Symbol('Unknown Integer');
+export const UnknownWellKnown = Symbol('Unknown Well-Known');
+export const SymbolToStringTag = Symbol('Symbol.toStringTag');
+export const SymbolDispose = Symbol('Symbol.dispose');
+export const SymbolAsyncDispose = Symbol('Symbol.asyncDispose');
+export const SymbolHasInstance = Symbol('Symbol.hasInstance');
 
-export type ObjectPath = ObjectPathKey[];
+interface SymbolSet<T extends symbol> extends Set<T> {
+	has(symbol: symbol): symbol is T;
+}
+
+const WELL_KNOWN_SYMBOLS_LIST = [
+	SymbolToStringTag,
+	SymbolDispose,
+	SymbolAsyncDispose,
+	SymbolHasInstance
+] as const;
+export type WellKnownSymbol = (typeof WELL_KNOWN_SYMBOLS_LIST)[number];
+export const WELL_KNOWN_SYMBOLS = new Set(WELL_KNOWN_SYMBOLS_LIST) as SymbolSet<WellKnownSymbol>;
+
+type AnyWellKnownSymbol = WellKnownSymbol | typeof UnknownWellKnown;
+export const isAnyWellKnown = (v: any): v is AnyWellKnownSymbol =>
+	WELL_KNOWN_SYMBOLS.has(v) || v === UnknownWellKnown;
+
+const TREE_SHAKEABLE_SYMBOLS_LIST = [SymbolHasInstance, SymbolDispose, SymbolAsyncDispose] as const;
+type TreeShakeableSymbol = (typeof TREE_SHAKEABLE_SYMBOLS_LIST)[number];
+export const TREE_SHAKEABLE_SYMBOLS = new Set(
+	TREE_SHAKEABLE_SYMBOLS_LIST
+) as SymbolSet<TreeShakeableSymbol>;
+
+export type ConcreteKey = string | WellKnownSymbol;
+export type ObjectPathKey =
+	| ConcreteKey
+	| typeof UnknownKey
+	| typeof UnknownWellKnown
+	| typeof UnknownNonAccessorKey
+	| typeof UnknownInteger;
+
+export const isConcreteKey = (v: ObjectPathKey): v is ConcreteKey =>
+	typeof v === 'string' || WELL_KNOWN_SYMBOLS.has(v);
+
+export type ObjectPath = readonly ObjectPathKey[];
 export const EMPTY_PATH: ObjectPath = [];
 export const UNKNOWN_PATH: ObjectPath = [UnknownKey];
+// For deoptimizations, this means we are modifying an unknown property but did
+// not lose track of the object or are creating a setter/getter;
+// For assignment effects it means we do not check for setter/getter effects
+// but only if something is mutated that is included, which is relevant for
+// Object.defineProperty
+export const UNKNOWN_NON_ACCESSOR_PATH: ObjectPath = [UnknownNonAccessorKey];
+export const UNKNOWN_INTEGER_PATH: ObjectPath = [UnknownInteger];
+export const INSTANCEOF_PATH: ObjectPath = [SymbolHasInstance];
 
 const EntitiesKey = Symbol('Entities');
 interface EntityPaths {
-	[EntitiesKey]: Set<Entity>;
-	[UnknownKey]?: EntityPaths;
 	[pathSegment: string]: EntityPaths;
+	[EntitiesKey]: Set<Entity>;
+	[SymbolToStringTag]?: EntityPaths;
+	[SymbolHasInstance]?: EntityPaths;
+	[SymbolDispose]?: EntityPaths;
+	[SymbolAsyncDispose]?: EntityPaths;
+	[UnknownInteger]?: EntityPaths;
+	[UnknownKey]?: EntityPaths;
+	[UnknownWellKnown]?: EntityPaths;
+	[UnknownNonAccessorKey]?: EntityPaths;
 }
 
-export class PathTracker {
-	entityPaths: EntityPaths = Object.create(null, { [EntitiesKey]: { value: new Set<Entity>() } });
+export class EntityPathTracker {
+	private readonly entityPaths: EntityPaths = Object.create(null, {
+		[EntitiesKey]: { value: new Set<Entity>() }
+	});
 
-	getEntities(path: ObjectPath): Set<Entity> {
+	trackEntityAtPathAndGetIfTracked(path: ObjectPath, entity: Entity): boolean {
+		const trackedEntities = this.getEntities(path);
+		if (trackedEntities.has(entity)) return true;
+		trackedEntities.add(entity);
+		return false;
+	}
+
+	withTrackedEntityAtPath<T>(
+		path: ObjectPath,
+		entity: Entity,
+		onUntracked: () => T,
+		returnIfTracked: T
+	): T {
+		const trackedEntities = this.getEntities(path);
+		if (trackedEntities.has(entity)) return returnIfTracked;
+		trackedEntities.add(entity);
+		const result = onUntracked();
+		trackedEntities.delete(entity);
+		return result;
+	}
+
+	private getEntities(path: ObjectPath): Set<Entity> {
 		let currentPaths = this.entityPaths;
 		for (const pathSegment of path) {
-			currentPaths = currentPaths[pathSegment] =
-				currentPaths[pathSegment] ||
-				Object.create(null, { [EntitiesKey]: { value: new Set<Entity>() } });
+			currentPaths = currentPaths[pathSegment] ||= Object.create(null, {
+				[EntitiesKey]: { value: new Set<Entity>() }
+			});
 		}
 		return currentPaths[EntitiesKey];
 	}
 }
 
-export const SHARED_RECURSION_TRACKER = new PathTracker();
+export const SHARED_RECURSION_TRACKER = new EntityPathTracker();
 
 interface DiscriminatedEntityPaths {
-	[EntitiesKey]: Map<object, Set<Entity>>;
-	[UnknownKey]?: DiscriminatedEntityPaths;
 	[pathSegment: string]: DiscriminatedEntityPaths;
+	[EntitiesKey]: Map<unknown, Set<Entity>>;
+	[SymbolToStringTag]?: DiscriminatedEntityPaths;
+	[SymbolHasInstance]?: DiscriminatedEntityPaths;
+	[SymbolDispose]?: DiscriminatedEntityPaths;
+	[SymbolAsyncDispose]?: DiscriminatedEntityPaths;
+	[UnknownInteger]?: DiscriminatedEntityPaths;
+	[UnknownKey]?: DiscriminatedEntityPaths;
+	[UnknownWellKnown]?: DiscriminatedEntityPaths;
+	[UnknownNonAccessorKey]?: DiscriminatedEntityPaths;
 }
 
 export class DiscriminatedPathTracker {
-	entityPaths: DiscriminatedEntityPaths = Object.create(null, {
-		[EntitiesKey]: { value: new Map<object, Set<Entity>>() }
+	private readonly entityPaths: DiscriminatedEntityPaths = Object.create(null, {
+		[EntitiesKey]: { value: new Map<unknown, Set<Entity>>() }
 	});
 
-	getEntities(path: ObjectPath, discriminator: object): Set<Entity> {
+	trackEntityAtPathAndGetIfTracked(
+		path: ObjectPath,
+		discriminator: unknown,
+		entity: unknown
+	): boolean {
 		let currentPaths = this.entityPaths;
 		for (const pathSegment of path) {
-			currentPaths = currentPaths[pathSegment] =
-				currentPaths[pathSegment] ||
-				Object.create(null, { [EntitiesKey]: { value: new Map<object, Set<Entity>>() } });
+			currentPaths = currentPaths[pathSegment] ||= Object.create(null, {
+				[EntitiesKey]: { value: new Map<unknown, Set<unknown>>() }
+			});
 		}
-		return getOrCreate(currentPaths[EntitiesKey], discriminator, () => new Set());
+		const trackedEntities = getOrCreate(
+			currentPaths[EntitiesKey],
+			discriminator,
+			getNewSet<unknown>
+		);
+		if (trackedEntities.has(entity)) return true;
+		trackedEntities.add(entity);
+		return false;
+	}
+}
+
+export interface IncludedPathTracker {
+	includeAllPaths(entity: ExpressionEntity, context: InclusionContext, basePath: ObjectPath): void;
+	includePathAndGetIfIncluded(path: ObjectPath): boolean;
+}
+
+type IncludedPaths = { [K in ConcreteKey]?: IncludedPaths } & { [UnknownKey]?: IncludedPaths };
+
+const UNKNOWN_INCLUDED_PATH: IncludedPaths = Object.freeze({ [UnknownKey]: EMPTY_OBJECT });
+
+export class IncludedFullPathTracker implements IncludedPathTracker {
+	private includedPaths: IncludedPaths | null = null;
+
+	includePathAndGetIfIncluded(path: ObjectPath): boolean {
+		let included = true;
+		let parent = this as unknown as IncludedPaths;
+		let parentSegment: ConcreteKey = 'includedPaths';
+		let currentPaths: IncludedPaths = (this.includedPaths ||=
+			((included = false), Object.create(null)));
+		for (const pathSegment of path) {
+			// This means from here, all paths are included
+			if (currentPaths[UnknownKey]) {
+				return true;
+			}
+			// Including UnknownKey automatically includes all nested paths.
+			// From above, we know that UnknownKey is not included yet.
+			if (!isConcreteKey(pathSegment)) {
+				// Hopefully, this saves some memory over just setting
+				// currentPaths[UnknownKey] = EMPTY_OBJECT
+				parent[parentSegment] = UNKNOWN_INCLUDED_PATH;
+				return false;
+			}
+			parent = currentPaths;
+			parentSegment = pathSegment;
+			currentPaths = currentPaths[pathSegment] ||= ((included = false), Object.create(null));
+		}
+		return included;
+	}
+
+	includeAllPaths(entity: ExpressionEntity, context: InclusionContext, basePath: ObjectPath) {
+		if (this.includedPaths) {
+			includeAllSubPaths(entity, context, basePath, this.includedPaths);
+		}
+	}
+}
+
+function includeAllSubPaths(
+	entity: ExpressionEntity,
+	context: InclusionContext,
+	path: ObjectPath,
+	includedPaths: IncludedPaths
+): void {
+	if (includedPaths[UnknownKey]) {
+		entity.includePath([...path, UnknownKey], context);
+		return;
+	}
+	const keys = Reflect.ownKeys(includedPaths) as ConcreteKey[];
+	if (keys.length === 0) {
+		entity.includePath(path, context);
+		return;
+	}
+	for (const key of keys) {
+		includeAllSubPaths(entity, context, [...path, key], includedPaths[key]!);
+	}
+}
+
+// "true" means not sub-paths are included, "UnknownKey" means at least some sub-paths are included
+type IncludedTopLevelPaths = Partial<Record<ConcreteKey, true | typeof UnknownKey>> & {
+	[UnknownKey]?: true;
+};
+
+const UNKNOWN_INCLUDED_TOP_LEVEL_PATH: Readonly<IncludedTopLevelPaths> = Object.freeze({
+	[UnknownKey]: true as const
+});
+
+export class IncludedTopLevelPathTracker implements IncludedPathTracker {
+	private includedPaths: IncludedTopLevelPaths | null = null;
+
+	includePathAndGetIfIncluded(path: ObjectPath): boolean {
+		let included = true;
+		const includedPaths: IncludedTopLevelPaths = (this.includedPaths ||=
+			((included = false), Object.create(null)));
+		if (includedPaths[UnknownKey]) {
+			return true;
+		}
+		const [firstPathSegment, secondPathSegment] = path;
+		if (!firstPathSegment) {
+			return included;
+		}
+		if (!isConcreteKey(firstPathSegment)) {
+			this.includedPaths = UNKNOWN_INCLUDED_TOP_LEVEL_PATH;
+			return false;
+		}
+		if (secondPathSegment) {
+			if (includedPaths[firstPathSegment] === UnknownKey) {
+				return true;
+			}
+			includedPaths[firstPathSegment] = UnknownKey;
+			return false;
+		}
+		if (includedPaths[firstPathSegment]) {
+			return true;
+		}
+		includedPaths[firstPathSegment] = true;
+		return false;
+	}
+
+	includeAllPaths(entity: ExpressionEntity, context: InclusionContext, basePath: ObjectPath) {
+		const { includedPaths } = this;
+		if (includedPaths) {
+			if (includedPaths[UnknownKey]) {
+				entity.includePath([...basePath, UnknownKey], context);
+			} else {
+				const keys = Reflect.ownKeys(includedPaths) as ConcreteKey[];
+				if (keys.length === 0) {
+					entity.includePath(basePath, context);
+				} else {
+					for (const key of keys) {
+						entity.includePath(
+							includedPaths[key] === UnknownKey
+								? [...basePath, key, UnknownKey]
+								: [...basePath, key],
+							context
+						);
+					}
+				}
+			}
+		}
 	}
 }

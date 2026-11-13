@@ -1,5 +1,5 @@
 'use strict';
 
-var dep = require('./generated-dep.js');
+var main1Alias_js = require('./main1-alias.js');
 
-console.log(dep.name);
+console.log(main1Alias_js.name);

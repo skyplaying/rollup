@@ -1,35 +1,99 @@
-import { EventEmitter } from 'events';
-import { RollupWatcher } from '../rollup/types';
+import { handleError } from '../../cli/logging';
+import type {
+	MaybeArray,
+	MergedRollupOptions,
+	RollupOptions,
+	RollupWatcher
+} from '../rollup/types';
 import { ensureArray } from '../utils/ensureArray';
-import { errInvalidOption, error } from '../utils/error';
-import { GenericConfigObject } from '../utils/options/options';
+import { error, logInvalidOption } from '../utils/logs';
+import { mergeOptions } from '../utils/options/mergeOptions';
+import { URL_WATCH } from '../utils/urls';
 import { loadFsEvents } from './fsevents-importer';
+import { WatchEmitter } from './WatchEmitter';
 
-class WatchEmitter extends EventEmitter {
-	constructor() {
-		super();
-		// Allows more than 10 bundles to be watched without
-		// showing the `MaxListenersExceededWarning` to the user.
-		this.setMaxListeners(Infinity);
-	}
+export default function watch(configs: RollupOptions[] | RollupOptions): RollupWatcher {
+	const emitter = new WatchEmitter() as RollupWatcher;
+	let isClosed = false;
+	// Until the watcher takes over closing, a close prevents its construction
+	// and emits close itself, as no watcher will.
+	emitter.close = async () => {
+		if (isClosed) return;
+		isClosed = true;
+		try {
+			await emitter.emit('close');
+		} finally {
+			emitter.removeAllListeners();
+		}
+	};
 
-	close() {}
+	watchInternal(configs, emitter, () => isClosed).catch(error => {
+		handleError(error);
+	});
+
+	return emitter;
 }
 
-export default function watch(configs: GenericConfigObject[] | GenericConfigObject): RollupWatcher {
-	const emitter = new WatchEmitter() as RollupWatcher;
-	const configArray = ensureArray(configs);
-	const watchConfigs = configArray.filter(config => config.watch !== false);
-	if (watchConfigs.length === 0) {
-		throw error(
-			errInvalidOption(
+function ensureTrailingSlash(path: string): string {
+	if (path[path.length - 1] !== '/') {
+		return `${path}/`;
+	}
+	return path;
+}
+
+function checkWatchConfig(config: MergedRollupOptions[]): void {
+	for (const item of config) {
+		if (typeof item.watch !== 'boolean' && item.watch?.allowInputInsideOutputPath) {
+			break;
+		}
+		if (item.input && item.output) {
+			const input = typeof item.input === 'string' ? ensureArray(item.input) : item.input;
+			const outputs = ensureArray(item.output);
+			for (const index in input) {
+				const inputPath = input[index as keyof typeof input];
+				if (typeof inputPath !== 'string') {
+					continue;
+				}
+				const outputWithInputAsSubPath = outputs.find(
+					({ dir }) => dir && ensureTrailingSlash(inputPath).startsWith(ensureTrailingSlash(dir))
+				);
+				if (outputWithInputAsSubPath) {
+					error(
+						logInvalidOption(
+							'watch',
+							URL_WATCH,
+							`the input "${inputPath}" is a subpath of the output "${outputWithInputAsSubPath.dir}"`
+						)
+					);
+				}
+			}
+		}
+	}
+}
+
+async function watchInternal(
+	configs: MaybeArray<RollupOptions>,
+	emitter: RollupWatcher,
+	wasClosed: () => boolean
+) {
+	const optionsList = await Promise.all(
+		ensureArray(configs).map(config => mergeOptions(config, true))
+	);
+	const watchOptionsList = optionsList.filter(config => config.watch !== false);
+	if (watchOptionsList.length === 0) {
+		return error(
+			logInvalidOption(
 				'watch',
+				URL_WATCH,
 				'there must be at least one config where "watch" is not set to "false"'
 			)
 		);
 	}
-	loadFsEvents()
-		.then(() => import('./watch'))
-		.then(({ Watcher }) => new Watcher(watchConfigs, emitter));
-	return emitter;
+	checkWatchConfig(watchOptionsList);
+	await loadFsEvents();
+	const { Watcher } = await import('./watch');
+	if (wasClosed()) {
+		return;
+	}
+	new Watcher(watchOptionsList, emitter);
 }

@@ -1,8 +1,8 @@
-const assert = require('assert');
+const assert = require('node:assert');
 
-module.exports = {
-	description: 'allows optional catch binding with appropriate acorn settings',
+module.exports = defineTest({
+	description: 'allows optional catch binding',
 	exports(exports) {
 		assert.equal(exports.foo, true);
 	}
-};
+});

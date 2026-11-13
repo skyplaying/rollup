@@ -1,9 +1,9 @@
-System.register([], function (exports, module) {
+System.register([], (function (exports, module) {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
-			const value = exports('value', 'shared');
+			const value = exports("value", 'shared');
 
 			console.log('a', value);
 			module.import('./generated-dynamic.js');
@@ -11,6 +11,6 @@ System.register([], function (exports, module) {
 			console.log('main', value);
 			module.import('./generated-dynamic.js');
 
-		}
+		})
 	};
-});
+}));

@@ -1,8 +1,8 @@
-module.exports = {
+module.exports = defineTest({
 	description: 'handles validate failure',
 	options: {
-		onwarn(warning) {
-			throw warning;
+		onLog(_level, log) {
+			throw log;
 		},
 		output: {
 			outro: '/*',
@@ -11,16 +11,15 @@ module.exports = {
 	},
 	generateError: {
 		code: 'CHUNK_INVALID',
-		message: 'Chunk "main.js" is not valid JavaScript: Unterminated comment (5:0).',
+		message: 'main.js (6:0): Chunk "main.js" is not valid JavaScript: Unterminated block comment.',
 		frame: `
-3: throw new Error('Not executed');
 4:
-5: /*
-   ^`,
+5: /*`,
 		loc: {
 			column: 0,
 			file: 'main.js',
-			line: 5
-		}
+			line: 6
+		},
+		pos: 52
 	}
-};
+});

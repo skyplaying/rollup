@@ -1,5 +1,6 @@
-module.exports = {
+const path = require('node:path');
+
+module.exports = defineTest({
 	description: 'CLI --plugin /absolute/path',
-	skipIfWindows: true,
-	command: `echo 'console.log(VALUE);' | rollup -p "\`pwd\`/my-plugin={VALUE: 'absolute', ZZZ: 1}"`
-};
+	spawnArgs: ['main.js', '-p', `${__dirname}${path.sep}my-plugin.js={VALUE: 'absolute', ZZZ: 1}`]
+});

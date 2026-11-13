@@ -1,15 +1,15 @@
-System.register([], function (exports) {
+System.register([], (function (exports) {
   'use strict';
   return {
-    execute: function () {
+    execute: (function () {
 
-      class C$1 {
+      let C$1 = class C {
         fn (num) {
           console.log(num - p);
         }
-      }
+      };
 
-      var p$1 = exports('p', 43);
+      var p$1 = exports("p", 43);
 
       new C$1().fn(p$1);
 
@@ -19,10 +19,10 @@ System.register([], function (exports) {
         }
       }
 
-      var p = exports('p2', 42);
+      var p = exports("p2", 42);
 
       new C().fn(p);
 
-    }
+    })
   };
-});
+}));

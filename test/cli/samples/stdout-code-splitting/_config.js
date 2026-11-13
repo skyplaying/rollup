@@ -1,14 +1,22 @@
-const assert = require('assert');
+const assert = require('node:assert');
 
-const COLOR = '\u001b[36m\u001b[1m';
-const STANDARD = '\u001b[22m\u001b[39m';
+const COLOR = '\u001B[36m\u001B[1m';
+const STANDARD = '\u001B[22m\u001B[39m';
 
-module.exports = {
+module.exports = defineTest({
 	description: 'bundles multiple files to stdout while adding file names',
 	skipIfWindows: true,
-	command:
-		'node wrapper.js -i main1.js -i main2.js -f es ' +
-		`-p '{buildStart(){this.emitFile({type: "asset",source:"Hello"})}}'`,
+	spawnScript: 'wrapper.js',
+	spawnArgs: [
+		'-i',
+		'main1.js',
+		'-i',
+		'main2.js',
+		'-f',
+		'es',
+		'-p',
+		'{buildStart(){this.emitFile({type: "asset",source:"Hello"})}}'
+	],
 	env: { FORCE_COLOR: '1', TERM: 'xterm' },
 	result(code) {
 		assert.equal(
@@ -20,8 +28,8 @@ module.exports = {
 				`${COLOR}//→ main2.js:${STANDARD}\n` +
 				"console.log('main2');\n" +
 				'\n' +
-				`${COLOR}//→ assets/asset-74b448a5:${STANDARD}\n` +
+				`${COLOR}//→ assets/asset-Bt0YMVe0:${STANDARD}\n` +
 				'Hello'
 		);
-	},
-};
+	}
+});

@@ -1,14 +1,14 @@
-System.register([], function (exports) {
+System.register([], (function (exports) {
   'use strict';
   return {
-    execute: function () {
+    execute: (function () {
 
-      exports('fn', fn);
+      exports("fn", fn);
 
       function fn () {
         console.log('lib1 fn');
       }
 
-    }
+    })
   };
-});
+}));

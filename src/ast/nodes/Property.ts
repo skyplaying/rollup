@@ -1,165 +1,139 @@
-import MagicString from 'magic-string';
-import { NormalizedTreeshakingOptions } from '../../rollup/types';
-import { RenderOptions } from '../../utils/renderHelpers';
-import { CallOptions, NO_ARGS } from '../CallOptions';
-import { DeoptimizableEntity } from '../DeoptimizableEntity';
-import { HasEffectsContext } from '../ExecutionContext';
-import {
-	EMPTY_PATH,
-	ObjectPath,
-	PathTracker,
-	SHARED_RECURSION_TRACKER,
-	UnknownKey
-} from '../utils/PathTracker';
-import { LiteralValueOrUnknown, UNKNOWN_EXPRESSION } from '../values';
-import * as NodeType from './NodeType';
-import { ExpressionEntity } from './shared/Expression';
-import { ExpressionNode, NodeBase } from './shared/Node';
-import { PatternNode } from './shared/Pattern';
+import type MagicString from 'magic-string';
+import type { RenderOptions } from '../../utils/renderHelpers';
+import type { HasEffectsContext, InclusionContext } from '../ExecutionContext';
+import { createHasEffectsContext } from '../ExecutionContext';
+import type { ObjectPath } from '../utils/PathTracker';
+import { UnknownKey } from '../utils/PathTracker';
+import type LocalVariable from '../variables/LocalVariable';
+import Identifier from './Identifier';
+import type Literal from './Literal';
+import type * as NodeType from './NodeType';
+import { Flag, isFlagSet, setFlag } from './shared/BitFlags';
+import { type ExpressionEntity } from './shared/Expression';
+import MethodBase from './shared/MethodBase';
+import type { ExpressionNode, IncludeChildren } from './shared/Node';
+import { doNotDeoptimize, onlyIncludeSelfNoDeoptimize } from './shared/Node';
+import type { DeclarationPatternNode, PatternNode } from './shared/Pattern';
+import type { VariableKind } from './shared/VariableKinds';
 
-export default class Property extends NodeBase implements DeoptimizableEntity, PatternNode {
-	computed!: boolean;
-	key!: ExpressionNode;
-	kind!: 'init' | 'get' | 'set';
-	method!: boolean;
-	shorthand!: boolean;
-	type!: NodeType.tProperty;
-	value!: ExpressionNode | (ExpressionNode & PatternNode);
+export default class Property extends MethodBase implements DeclarationPatternNode {
+	declare key: ExpressionNode;
+	declare kind: 'init' | 'get' | 'set';
+	declare type: NodeType.tProperty;
 
-	private accessorCallOptions!: CallOptions;
-	private declarationInit: ExpressionEntity | null = null;
-	private returnExpression: ExpressionEntity | null = null;
-
-	bind() {
-		super.bind();
-		if (this.kind === 'get') {
-			// ensure the returnExpression is set for the tree-shaking passes
-			this.getReturnExpression();
-		}
-		if (this.declarationInit !== null) {
-			this.declarationInit.deoptimizePath([UnknownKey, UnknownKey]);
-		}
+	//declare method: boolean;
+	get method(): boolean {
+		return isFlagSet(this.flags, Flag.method);
+	}
+	set method(value: boolean) {
+		this.flags = setFlag(this.flags, Flag.method, value);
 	}
 
-	declare(kind: string, init: ExpressionEntity) {
-		this.declarationInit = init;
-		return (this.value as PatternNode).declare(kind, UNKNOWN_EXPRESSION);
+	//declare shorthand: boolean;
+	get shorthand(): boolean {
+		return isFlagSet(this.flags, Flag.shorthand);
+	}
+	set shorthand(value: boolean) {
+		this.flags = setFlag(this.flags, Flag.shorthand, value);
 	}
 
-	// As getter properties directly receive their values from function expressions that always
-	// have a fixed return value, there is no known situation where a getter is deoptimized.
-	deoptimizeCache(): void {}
-
-	deoptimizePath(path: ObjectPath) {
-		if (this.kind === 'get') {
-			this.getReturnExpression().deoptimizePath(path);
-		} else {
-			this.value.deoptimizePath(path);
-		}
+	declare(
+		kind: VariableKind,
+		destructuredInitPath: ObjectPath,
+		init: ExpressionEntity
+	): LocalVariable[] {
+		return (this.value as DeclarationPatternNode).declare(
+			kind,
+			this.getPathInProperty(destructuredInitPath),
+			init
+		);
 	}
 
-	getLiteralValueAtPath(
-		path: ObjectPath,
-		recursionTracker: PathTracker,
-		origin: DeoptimizableEntity
-	): LiteralValueOrUnknown {
-		if (this.kind === 'get') {
-			return this.getReturnExpression().getLiteralValueAtPath(path, recursionTracker, origin);
-		}
-		return this.value.getLiteralValueAtPath(path, recursionTracker, origin);
-	}
-
-	getReturnExpressionWhenCalledAtPath(
-		path: ObjectPath,
-		recursionTracker: PathTracker,
-		origin: DeoptimizableEntity
-	): ExpressionEntity {
-		if (this.kind === 'get') {
-			return this.getReturnExpression().getReturnExpressionWhenCalledAtPath(
-				path,
-				recursionTracker,
-				origin
-			);
-		}
-		return this.value.getReturnExpressionWhenCalledAtPath(path, recursionTracker, origin);
+	deoptimizeAssignment(destructuredInitPath: ObjectPath, init: ExpressionEntity): void {
+		(this.value as PatternNode).deoptimizeAssignment?.(
+			this.getPathInProperty(destructuredInitPath),
+			init
+		);
 	}
 
 	hasEffects(context: HasEffectsContext): boolean {
-		const propertyReadSideEffects = (this.context.options.treeshake as NormalizedTreeshakingOptions).propertyReadSideEffects;
-		return this.parent.type === 'ObjectPattern' && propertyReadSideEffects === 'always' ||
-			this.key.hasEffects(context) ||
-			this.value.hasEffects(context);
+		return this.key.hasEffects(context) || this.value.hasEffects(context);
 	}
 
-	hasEffectsWhenAccessedAtPath(path: ObjectPath, context: HasEffectsContext): boolean {
-		if (this.kind === 'get') {
-			const trackedExpressions = context.accessed.getEntities(path);
-			if (trackedExpressions.has(this)) return false;
-			trackedExpressions.add(this);
-			return (
-				this.value.hasEffectsWhenCalledAtPath(EMPTY_PATH, this.accessorCallOptions, context) ||
-				(path.length > 0 && this.returnExpression!.hasEffectsWhenAccessedAtPath(path, context))
-			);
+	hasEffectsWhenDestructuring(
+		context: HasEffectsContext,
+		destructuredInitPath: ObjectPath,
+		init: ExpressionEntity
+	): boolean {
+		return (this.value as PatternNode).hasEffectsWhenDestructuring?.(
+			context,
+			this.getPathInProperty(destructuredInitPath),
+			init
+		);
+	}
+
+	includeDestructuredIfNecessary(
+		context: InclusionContext,
+		destructuredInitPath: ObjectPath,
+		init: ExpressionEntity
+	): boolean {
+		const path = this.getPathInProperty(destructuredInitPath);
+		let included =
+			(this.value as PatternNode).includeDestructuredIfNecessary(context, path, init) ||
+			this.included;
+		if ((included ||= this.key.hasEffects(createHasEffectsContext()))) {
+			this.key.include(context, false);
+			if (!this.value.included) {
+				this.value.includeNode(context);
+				// Unfortunately, we need to include the value again now, so that any
+				// declared variables are properly included.
+				(this.value as PatternNode).includeDestructuredIfNecessary(context, path, init);
+			}
 		}
-		return this.value.hasEffectsWhenAccessedAtPath(path, context);
-	}
-
-	hasEffectsWhenAssignedAtPath(path: ObjectPath, context: HasEffectsContext): boolean {
-		if (this.kind === 'get') {
-			const trackedExpressions = context.assigned.getEntities(path);
-			if (trackedExpressions.has(this)) return false;
-			trackedExpressions.add(this);
-			return this.returnExpression!.hasEffectsWhenAssignedAtPath(path, context);
+		if (!this.included && included) {
+			this.includeNode(context);
 		}
-		if (this.kind === 'set') {
-			const trackedExpressions = context.assigned.getEntities(path);
-			if (trackedExpressions.has(this)) return false;
-			trackedExpressions.add(this);
-			return this.value.hasEffectsWhenCalledAtPath(EMPTY_PATH, this.accessorCallOptions, context);
-		}
-		return this.value.hasEffectsWhenAssignedAtPath(path, context);
+		return this.included;
 	}
 
-	hasEffectsWhenCalledAtPath(
-		path: ObjectPath,
-		callOptions: CallOptions,
-		context: HasEffectsContext
-	) {
-		if (this.kind === 'get') {
-			const trackedExpressions = (callOptions.withNew
-				? context.instantiated
-				: context.called
-			).getEntities(path, callOptions);
-			if (trackedExpressions.has(this)) return false;
-			trackedExpressions.add(this);
-			return this.returnExpression!.hasEffectsWhenCalledAtPath(path, callOptions, context);
-		}
-		return this.value.hasEffectsWhenCalledAtPath(path, callOptions, context);
+	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren) {
+		this.included = true;
+		this.key.include(context, includeChildrenRecursively);
+		this.value.include(context, includeChildrenRecursively);
 	}
 
-	initialise() {
-		this.accessorCallOptions = {
-			args: NO_ARGS,
-			withNew: false
-		};
+	includePath(path: ObjectPath, context: InclusionContext) {
+		this.included = true;
+		this.value.includePath(path, context);
 	}
 
-	render(code: MagicString, options: RenderOptions) {
+	markDeclarationReached(): void {
+		(this.value as DeclarationPatternNode).markDeclarationReached();
+	}
+
+	render(code: MagicString, options: RenderOptions): void {
 		if (!this.shorthand) {
 			this.key.render(code, options);
 		}
 		this.value.render(code, options, { isShorthandProperty: this.shorthand });
 	}
 
-	private getReturnExpression(): ExpressionEntity {
-		if (this.returnExpression === null) {
-			this.returnExpression = UNKNOWN_EXPRESSION;
-			return (this.returnExpression = this.value.getReturnExpressionWhenCalledAtPath(
-				EMPTY_PATH,
-				SHARED_RECURSION_TRACKER,
-				this
-			));
-		}
-		return this.returnExpression;
+	setAssignedValue(value: ExpressionEntity): void {
+		(this.value as PatternNode).setAssignedValue(value);
+	}
+
+	private getPathInProperty(destructuredInitPath: ObjectPath): ObjectPath {
+		return destructuredInitPath.at(-1) === UnknownKey
+			? destructuredInitPath
+			: // For now, we only consider static paths as we do not know how to
+				// deoptimize the path in the dynamic case.
+				this.computed
+				? [...destructuredInitPath, UnknownKey]
+				: this.key instanceof Identifier
+					? [...destructuredInitPath, this.key.name]
+					: [...destructuredInitPath, String((this.key as Literal).value)];
 	}
 }
+
+Property.prototype.includeNode = onlyIncludeSelfNoDeoptimize;
+Property.prototype.applyDeoptimizations = doNotDeoptimize;

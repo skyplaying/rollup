@@ -1,34 +1,34 @@
-const assert = require('assert');
-const path = require('path');
-const { assertIncludes } = require('../../../utils.js');
+const assert = require('node:assert');
+const path = require('node:path');
+const { assertIncludes } = require('../../../testHelpers.js');
+const ID_MAIN = path.join(__dirname, 'main.js');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'disallows updates to namespace exports',
 	code(code) {
-		assertIncludes(code, 'foo++');
+		assertIncludes(code, "exp['foo']++");
 	},
 	warnings: [
 		{
-			code: 'ILLEGAL_NAMESPACE_REASSIGNMENT',
-			message: `Illegal reassignment to import 'exp'`,
-			id: path.join(__dirname, 'main.js'),
+			code: 'ILLEGAL_REASSIGNMENT',
+			message: 'main.js (3:0): Illegal reassignment of import "exp" in "main.js".',
+			id: ID_MAIN,
 			pos: 31,
 			loc: {
-				file: path.join(__dirname, 'main.js'),
-				line: 3,
-				column: 0
+				column: 0,
+				file: ID_MAIN,
+				line: 3
 			},
 			frame: `
-			1: import * as exp from './foo';
-			2:
-			3: exp['foo']++;
-			   ^
-		`
+				1: import * as exp from './foo';
+				2:
+				3: exp['foo']++;
+				   ^`
 		}
 	],
 	runtimeError(error) {
-		assert.strictEqual(error.message, 'Assignment to constant variable.');
+		assert.ok(error instanceof TypeError);
 	}
-};
+});
 
 // test copied from https://github.com/esnext/es6-module-transpiler/tree/master/test/examples/namespace-update-import-fails

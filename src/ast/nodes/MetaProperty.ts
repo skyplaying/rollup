@@ -1,46 +1,44 @@
-import MagicString from 'magic-string';
-import { InternalModuleFormat } from '../../rollup/types';
-import { warnDeprecation } from '../../utils/error';
+import type MagicString from 'magic-string';
+import type { InternalModuleFormat } from '../../rollup/types';
+import { escapeId } from '../../utils/escapeId';
+import type { GenerateCodeSnippets } from '../../utils/generateCodeSnippets';
+import { DOCUMENT_CURRENT_SCRIPT } from '../../utils/interopHelpers';
 import { dirname, normalize, relative } from '../../utils/path';
-import { PluginDriver } from '../../utils/PluginDriver';
-import ChildScope from '../scopes/ChildScope';
-import { ObjectPathKey } from '../utils/PathTracker';
-import Identifier from './Identifier';
+import type { PluginDriver } from '../../utils/PluginDriver';
+import type { RenderOptions } from '../../utils/renderHelpers';
+import type { NodeInteraction } from '../NodeInteractions';
+import { INTERACTION_ACCESSED } from '../NodeInteractions';
+import type ChildScope from '../scopes/ChildScope';
+import type { ObjectPath } from '../utils/PathTracker';
+import type Identifier from './Identifier';
 import MemberExpression from './MemberExpression';
-import * as NodeType from './NodeType';
+import type * as NodeType from './NodeType';
 import { NodeBase } from './shared/Node';
 
-const ASSET_PREFIX = 'ROLLUP_ASSET_URL_';
-const CHUNK_PREFIX = 'ROLLUP_CHUNK_URL_';
 const FILE_PREFIX = 'ROLLUP_FILE_URL_';
+const FILE_OBJ_PREFIX = 'ROLLUP_FILE_URL_OBJ_';
+const IMPORT = 'import';
 
 export default class MetaProperty extends NodeBase {
-	meta!: Identifier;
-	property!: Identifier;
-	type!: NodeType.tMetaProperty;
+	declare meta: Identifier;
+	declare property: Identifier;
+	declare type: NodeType.tMetaProperty;
 
-	private metaProperty?: string | null;
-
-	addAccessedGlobals(
-		format: InternalModuleFormat,
-		accessedGlobalsByScope: Map<ChildScope, Set<string>>
-	) {
-		const metaProperty = this.metaProperty;
-		const accessedGlobals = (metaProperty &&
-		(metaProperty.startsWith(FILE_PREFIX) ||
-			metaProperty.startsWith(ASSET_PREFIX) ||
-			metaProperty.startsWith(CHUNK_PREFIX))
-			? accessedFileUrlGlobals
-			: accessedMetaUrlGlobals)[format];
-		if (accessedGlobals.length > 0) {
-			this.scope.addAccessedGlobals(accessedGlobals, accessedGlobalsByScope);
-		}
-	}
+	private metaProperty: string | null = null;
+	private preliminaryChunkId: string | null = null;
+	private referenceId: string | null = null;
 
 	getReferencedFileName(outputPluginDriver: PluginDriver): string | null {
-		const metaProperty = this.metaProperty as string | null;
-		if (metaProperty && metaProperty.startsWith(FILE_PREFIX)) {
-			return outputPluginDriver.getFileName(metaProperty.substr(FILE_PREFIX.length));
+		const {
+			meta: { name },
+			metaProperty
+		} = this;
+		if (name === IMPORT) {
+			if (metaProperty?.startsWith(FILE_OBJ_PREFIX)) {
+				return outputPluginDriver.getFileName(metaProperty.slice(FILE_OBJ_PREFIX.length));
+			} else if (metaProperty?.startsWith(FILE_PREFIX)) {
+				return outputPluginDriver.getFileName(metaProperty.slice(FILE_PREFIX.length));
+			}
 		}
 		return null;
 	}
@@ -49,91 +47,61 @@ export default class MetaProperty extends NodeBase {
 		return false;
 	}
 
-	hasEffectsWhenAccessedAtPath(path: ObjectPathKey[]): boolean {
-		return path.length > 1;
+	hasEffectsOnInteractionAtPath(path: ObjectPath, { type }: NodeInteraction): boolean {
+		return path.length > 1 || type !== INTERACTION_ACCESSED;
 	}
 
-	include() {
-		if (!this.included) {
-			this.included = true;
-			if (this.meta.name === 'import') {
-				this.context.addImportMeta(this);
-				const parent = this.parent;
-				this.metaProperty =
-					parent instanceof MemberExpression && typeof parent.propertyKey === 'string'
-						? parent.propertyKey
-						: null;
+	include(): void {
+		if (!this.included) this.includeNode();
+	}
+
+	includeNode() {
+		this.included = true;
+		if (this.meta.name === IMPORT) {
+			this.scope.context.addImportMeta(this);
+			const parent = this.parent;
+			const metaProperty = (this.metaProperty =
+				parent instanceof MemberExpression && typeof parent.propertyKey === 'string'
+					? parent.propertyKey
+					: null);
+			if (metaProperty?.startsWith(FILE_OBJ_PREFIX)) {
+				this.referenceId = metaProperty.slice(FILE_OBJ_PREFIX.length);
+			} else if (metaProperty?.startsWith(FILE_PREFIX)) {
+				this.referenceId = metaProperty.slice(FILE_PREFIX.length);
 			}
 		}
 	}
 
-	renderFinalMechanism(
-		code: MagicString,
-		chunkId: string,
-		format: InternalModuleFormat,
-		outputPluginDriver: PluginDriver
-	): void {
-		const parent = this.parent;
-		const metaProperty = this.metaProperty as string | null;
+	render(code: MagicString, renderOptions: RenderOptions): void {
+		const { format, pluginDriver, snippets } = renderOptions;
+		const {
+			scope: {
+				context: { module }
+			},
+			meta: { name },
+			metaProperty,
+			parent,
+			preliminaryChunkId,
+			referenceId,
+			start,
+			end
+		} = this;
+		const {
+			id: moduleId,
+			info: { attributes }
+		} = module;
 
-		if (
-			metaProperty &&
-			(metaProperty.startsWith(FILE_PREFIX) ||
-				metaProperty.startsWith(ASSET_PREFIX) ||
-				metaProperty.startsWith(CHUNK_PREFIX))
-		) {
-			let referenceId: string | null = null;
-			let assetReferenceId: string | null = null;
-			let chunkReferenceId: string | null = null;
-			let fileName: string;
-			if (metaProperty.startsWith(FILE_PREFIX)) {
-				referenceId = metaProperty.substr(FILE_PREFIX.length);
-				fileName = outputPluginDriver.getFileName(referenceId);
-			} else if (metaProperty.startsWith(ASSET_PREFIX)) {
-				warnDeprecation(
-					`Using the "${ASSET_PREFIX}" prefix to reference files is deprecated. Use the "${FILE_PREFIX}" prefix instead.`,
-					true,
-					this.context.options
-				);
-				assetReferenceId = metaProperty.substr(ASSET_PREFIX.length);
-				fileName = outputPluginDriver.getFileName(assetReferenceId);
-			} else {
-				warnDeprecation(
-					`Using the "${CHUNK_PREFIX}" prefix to reference files is deprecated. Use the "${FILE_PREFIX}" prefix instead.`,
-					true,
-					this.context.options
-				);
-				chunkReferenceId = metaProperty.substr(CHUNK_PREFIX.length);
-				fileName = outputPluginDriver.getFileName(chunkReferenceId);
-			}
+		if (name !== IMPORT) return;
+		const chunkId = preliminaryChunkId!;
+
+		if (referenceId) {
+			const fileName = pluginDriver.getFileName(referenceId);
 			const relativePath = normalize(relative(dirname(chunkId), fileName));
-			let replacement;
-			if (assetReferenceId !== null) {
-				replacement = outputPluginDriver.hookFirstSync('resolveAssetUrl', [
-					{
-						assetFileName: fileName,
-						chunkId,
-						format,
-						moduleId: this.context.module.id,
-						relativeAssetPath: relativePath
-					}
-				]);
-			}
-			if (!replacement) {
-				replacement =
-					outputPluginDriver.hookFirstSync('resolveFileUrl', [
-						{
-							assetReferenceId,
-							chunkId,
-							chunkReferenceId,
-							fileName,
-							format,
-							moduleId: this.context.module.id,
-							referenceId: referenceId || assetReferenceId || chunkReferenceId!,
-							relativePath
-						}
-					]) || relativeUrlMechanisms[format](relativePath);
-			}
+			const isUrlObject = !!metaProperty?.startsWith(FILE_OBJ_PREFIX);
+			const replacement =
+				pluginDriver.hookFirstSync('resolveFileUrl', [
+					{ attributes, chunkId, fileName, format, moduleId, referenceId, relativePath }
+				]) || relativeUrlMechanisms[format](relativePath, isUrlObject);
 
 			code.overwrite(
 				(parent as MemberExpression).start,
@@ -144,32 +112,50 @@ export default class MetaProperty extends NodeBase {
 			return;
 		}
 
-		const replacement =
-			outputPluginDriver.hookFirstSync('resolveImportMeta', [
-				metaProperty,
-				{
-					chunkId,
-					format,
-					moduleId: this.context.module.id
-				}
-			]) || importMetaMechanisms[format]?.(metaProperty, chunkId);
+		let replacement = pluginDriver.hookFirstSync('resolveImportMeta', [
+			metaProperty,
+			{ attributes, chunkId, format, moduleId }
+		]);
+		if (!replacement) {
+			replacement = importMetaMechanisms[format]?.(metaProperty, { chunkId, snippets });
+			renderOptions.accessedDocumentCurrentScript ||=
+				formatsMaybeAccessDocumentCurrentScript.includes(format) && replacement !== 'undefined';
+		}
 		if (typeof replacement === 'string') {
 			if (parent instanceof MemberExpression) {
 				code.overwrite(parent.start, parent.end, replacement, { contentOnly: true });
 			} else {
-				code.overwrite(this.start, this.end, replacement, { contentOnly: true });
+				code.overwrite(start, end, replacement, { contentOnly: true });
 			}
+		}
+	}
+
+	setResolution(
+		format: InternalModuleFormat,
+		accessedGlobalsByScope: Map<ChildScope, Set<string>>,
+		preliminaryChunkId: string
+	): void {
+		this.preliminaryChunkId = preliminaryChunkId;
+		const accessedGlobals = (
+			this.metaProperty?.startsWith(FILE_PREFIX) || this.metaProperty?.startsWith(FILE_OBJ_PREFIX)
+				? accessedFileUrlGlobals
+				: accessedMetaUrlGlobals
+		)[format];
+		if (accessedGlobals.length > 0) {
+			this.scope.addAccessedGlobals(accessedGlobals, accessedGlobalsByScope);
 		}
 	}
 }
 
+export const formatsMaybeAccessDocumentCurrentScript = ['cjs', 'iife', 'umd'];
+
 const accessedMetaUrlGlobals = {
 	amd: ['document', 'module', 'URL'],
-	cjs: ['document', 'require', 'URL'],
+	cjs: ['document', 'require', 'URL', DOCUMENT_CURRENT_SCRIPT],
 	es: [],
-	iife: ['document', 'URL'],
+	iife: ['document', 'URL', DOCUMENT_CURRENT_SCRIPT],
 	system: ['module'],
-	umd: ['document', 'require', 'URL']
+	umd: ['document', 'require', 'URL', DOCUMENT_CURRENT_SCRIPT]
 };
 
 const accessedFileUrlGlobals = {
@@ -181,60 +167,74 @@ const accessedFileUrlGlobals = {
 	umd: ['document', 'require', 'URL']
 };
 
-const getResolveUrl = (path: string, URL = 'URL') => `new ${URL}(${path}).href`;
+const getResolveUrl = (path: string, asObject: boolean, URL = 'URL') =>
+	`new ${URL}(${path})${asObject ? '' : '.href'}`;
 
-const getRelativeUrlFromDocument = (relativePath: string) =>
+const getRelativeUrlFromDocument = (relativePath: string, asObject: boolean, umd = false) =>
 	getResolveUrl(
-		`'${relativePath}', document.currentScript && document.currentScript.src || document.baseURI`
+		`'${escapeId(relativePath)}', ${
+			umd ? `typeof document === 'undefined' ? location.href : ` : ''
+		}document.currentScript && document.currentScript.tagName.toUpperCase() === 'SCRIPT' && document.currentScript.src || document.baseURI`,
+		asObject
 	);
 
-const getGenericImportMetaMechanism = (getUrl: (chunkId: string) => string) => (
-	prop: string | null,
-	chunkId: string
-) => {
-	const urlMechanism = getUrl(chunkId);
-	return prop === null ? `({ url: ${urlMechanism} })` : prop === 'url' ? urlMechanism : 'undefined';
-};
+const getGenericImportMetaMechanism =
+	(getUrl: (chunkId: string) => string) =>
+	(property: string | null, { chunkId }: { chunkId: string }) => {
+		const urlMechanism = getUrl(chunkId);
+		return property === null
+			? `({ url: ${urlMechanism} })`
+			: property === 'url'
+				? urlMechanism
+				: 'undefined';
+	};
 
-const getUrlFromDocument = (chunkId: string) =>
-	`(document.currentScript && document.currentScript.src || new URL('${chunkId}', document.baseURI).href)`;
+const getFileUrlFromFullPath = (path: string, asObject: boolean) =>
+	`require('u' + 'rl').pathToFileURL(${path})${asObject ? '' : '.href'}`;
 
-const relativeUrlMechanisms: Record<InternalModuleFormat, (relativePath: string) => string> = {
-	amd: relativePath => {
+const getFileUrlFromRelativePath = (path: string, asObject: boolean) =>
+	getFileUrlFromFullPath(`__dirname + '/${escapeId(path)}'`, asObject);
+
+const getUrlFromDocument = (chunkId: string, umd = false) =>
+	`${
+		umd ? `typeof document === 'undefined' ? location.href : ` : ''
+	}(${DOCUMENT_CURRENT_SCRIPT} && ${DOCUMENT_CURRENT_SCRIPT}.tagName.toUpperCase() === 'SCRIPT' && ${DOCUMENT_CURRENT_SCRIPT}.src || new URL('${escapeId(
+		chunkId
+	)}', document.baseURI).href)`;
+
+const relativeUrlMechanisms: Record<
+	InternalModuleFormat,
+	(relativePath: string, asObject: boolean) => string
+> = {
+	amd: (relativePath, asObject: boolean) => {
 		if (relativePath[0] !== '.') relativePath = './' + relativePath;
-		return getResolveUrl(`require.toUrl('${relativePath}'), document.baseURI`);
+		return getResolveUrl(`require.toUrl('${escapeId(relativePath)}'), document.baseURI`, asObject);
 	},
-	cjs: relativePath =>
-		`(typeof document === 'undefined' ? ${getResolveUrl(
-			`'file:' + __dirname + '/${relativePath}'`,
-			`(require('u' + 'rl').URL)`
-		)} : ${getRelativeUrlFromDocument(relativePath)})`,
-	es: relativePath => getResolveUrl(`'${relativePath}', import.meta.url`),
-	iife: relativePath => getRelativeUrlFromDocument(relativePath),
-	system: relativePath => getResolveUrl(`'${relativePath}', module.meta.url`),
-	umd: relativePath =>
-		`(typeof document === 'undefined' ? ${getResolveUrl(
-			`'file:' + __dirname + '/${relativePath}'`,
-			`(require('u' + 'rl').URL)`
-		)} : ${getRelativeUrlFromDocument(relativePath)})`
+	cjs: (relativePath, asObject: boolean) =>
+		`(typeof document === 'undefined' ? ${getFileUrlFromRelativePath(relativePath, asObject)} : ${getRelativeUrlFromDocument(relativePath, asObject)})`,
+	es: (relativePath, asObject: boolean) =>
+		getResolveUrl(`'${escapeId(relativePath)}', import.meta.url`, asObject),
+	iife: (relativePath, asObject: boolean) => getRelativeUrlFromDocument(relativePath, asObject),
+	system: (relativePath, asObject: boolean) =>
+		getResolveUrl(`'${escapeId(relativePath)}', module.meta.url`, asObject),
+	umd: (relativePath, asObject: boolean) =>
+		`(typeof document === 'undefined' && typeof location === 'undefined' ? ${getFileUrlFromRelativePath(relativePath, asObject)} : ${getRelativeUrlFromDocument(relativePath, asObject, true)})`
 };
 
-const importMetaMechanisms: Record<string, (prop: string | null, chunkId: string) => string> = {
-	amd: getGenericImportMetaMechanism(() => getResolveUrl(`module.uri, document.baseURI`)),
+const importMetaMechanisms: Record<
+	string,
+	(property: string | null, options: { chunkId: string; snippets: GenerateCodeSnippets }) => string
+> = {
+	amd: getGenericImportMetaMechanism(() => getResolveUrl(`module.uri, document.baseURI`, false)),
 	cjs: getGenericImportMetaMechanism(
 		chunkId =>
-			`(typeof document === 'undefined' ? ${getResolveUrl(
-				`'file:' + __filename`,
-				`(require('u' + 'rl').URL)`
-			)} : ${getUrlFromDocument(chunkId)})`
+			`(typeof document === 'undefined' ? ${getFileUrlFromFullPath('__filename', false)} : ${getUrlFromDocument(chunkId)})`
 	),
 	iife: getGenericImportMetaMechanism(chunkId => getUrlFromDocument(chunkId)),
-	system: prop => (prop === null ? `module.meta` : `module.meta.${prop}`),
+	system: (property, { snippets: { getPropertyAccess } }) =>
+		property === null ? `module.meta` : `module.meta${getPropertyAccess(property)}`,
 	umd: getGenericImportMetaMechanism(
 		chunkId =>
-			`(typeof document === 'undefined' ? ${getResolveUrl(
-				`'file:' + __filename`,
-				`(require('u' + 'rl').URL)`
-			)} : ${getUrlFromDocument(chunkId)})`
+			`(typeof document === 'undefined' && typeof location === 'undefined' ? ${getFileUrlFromFullPath('__filename', false)} : ${getUrlFromDocument(chunkId, true)})`
 	)
 };

@@ -1,14 +1,14 @@
-System.register([], function (exports) {
+System.register([], (function (exports) {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
 			console.log('dep');
 
 			console.log('main');
 
-			const value = exports('value', 42);
+			const value = exports("value", 42);
 
-		}
+		})
 	};
-});
+}));

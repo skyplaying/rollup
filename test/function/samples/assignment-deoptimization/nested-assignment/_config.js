@@ -1,3 +1,3 @@
-module.exports = {
-	description: 'tracks assigments nested in expressions that are included for other reasons'
-};
+module.exports = defineTest({
+	description: 'tracks assignments nested in expressions that are included for other reasons'
+});

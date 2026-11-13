@@ -1,10 +1,11 @@
-const assert = require('assert');
+const assert = require('node:assert');
 
-module.exports = {
-	description: 'generates output file when multiple configurations are specified and one build fails',
-	command: 'rollup -c',
-	error: err => {
-		assert.ok(/Unexpected Exception/.test(err.message));
+module.exports = defineTest({
+	description:
+		'generates output file when multiple configurations are specified and one build fails',
+	spawnArgs: ['-c'],
+	error: error => {
+		assert.ok(/Unexpected Exception/.test(error.message));
 		return true;
 	}
-};
+});

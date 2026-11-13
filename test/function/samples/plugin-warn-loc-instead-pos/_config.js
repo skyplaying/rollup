@@ -1,12 +1,12 @@
-const path = require('path');
+const path = require('node:path');
 
-module.exports = {
+module.exports = defineTest({
 	description: '`this.warn(...)` accepts { line, column } object as second parameter (#1265)',
 	options: {
 		plugins: [
 			{
 				name: 'test',
-				transform(code, id) {
+				transform() {
 					this.warn('foo', { line: 1, column: 22 });
 					return 'assert.equal( 21 * 2, 42 );';
 				}
@@ -19,7 +19,7 @@ module.exports = {
 			id: path.join(__dirname, 'main.js'),
 			plugin: 'test',
 			hook: 'transform',
-			message: 'foo',
+			message: '[plugin test] main.js (1:22): foo',
 			loc: {
 				file: path.join(__dirname, 'main.js'),
 				line: 1,
@@ -31,4 +31,4 @@ module.exports = {
 			`
 		}
 	]
-};
+});

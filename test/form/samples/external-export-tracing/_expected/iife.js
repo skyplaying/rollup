@@ -3,15 +3,11 @@ var myBundle = (function (exports, external) {
 
 
 
-	Object.defineProperty(exports, 's', {
+	Object.defineProperty(exports, "s", {
 		enumerable: true,
-		get: function () {
-			return external.p;
-		}
+		get: function () { return external.p; }
 	});
-
-	Object.defineProperty(exports, '__esModule', { value: true });
 
 	return exports;
 
-}({}, external));
+})({}, external);

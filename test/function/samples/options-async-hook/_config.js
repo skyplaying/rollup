@@ -1,8 +1,9 @@
-const assert = require('assert');
-const { promises: fs } = require('fs');
+const assert = require('node:assert');
+const { promises: fs } = require('node:fs');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'resolves promises between sequential options hooks',
+	verifyAst: false,
 	options: {
 		input: 'super-unused',
 		treeshake: false,
@@ -16,18 +17,16 @@ module.exports = {
 						strictDeprecations: true,
 						treeshake: false
 					});
-					return Object.assign({}, options, {
-						input: (await fs.readFile('file.txt', 'utf8')).trim()
-					});
+					return { ...options, input: (await fs.readFile('file.txt', 'utf8')).trim() };
 				}
 			},
 			{
 				name: 'test-plugin-2',
 				options(options) {
 					assert.strictEqual(options.input, 'unused');
-					return Object.assign({}, options, { input: 'used' });
+					return { ...options, input: 'used' };
 				}
 			}
 		]
 	}
-};
+});

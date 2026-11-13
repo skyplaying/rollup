@@ -1,34 +1,49 @@
-import { AstContext } from '../../Module';
-import { InclusionContext } from '../ExecutionContext';
-import { ExpressionNode } from '../nodes/shared/Node';
-import SpreadElement from '../nodes/SpreadElement';
+import type { InclusionContext } from '../ExecutionContext';
+import type { NodeInteractionCalled } from '../NodeInteractions';
+import type { ExpressionEntity } from '../nodes/shared/Expression';
+import type { NodeBase } from '../nodes/shared/Node';
+import { UNKNOWN_PATH } from '../utils/PathTracker';
 import ArgumentsVariable from '../variables/ArgumentsVariable';
 import ThisVariable from '../variables/ThisVariable';
-import ChildScope from './ChildScope';
+import type ChildScope from './ChildScope';
 import ReturnValueScope from './ReturnValueScope';
 
 export default class FunctionScope extends ReturnValueScope {
-	argumentsVariable: ArgumentsVariable;
-	thisVariable: ThisVariable;
+	readonly argumentsVariable: ArgumentsVariable;
+	readonly thisVariable: ThisVariable;
 
-	constructor(parent: ChildScope, context: AstContext) {
-		super(parent, context);
+	constructor(
+		parent: ChildScope,
+		readonly functionNode: NodeBase
+	) {
+		super(parent, false);
+		const { context } = parent;
 		this.variables.set('arguments', (this.argumentsVariable = new ArgumentsVariable(context)));
 		this.variables.set('this', (this.thisVariable = new ThisVariable(context)));
 	}
 
-	findLexicalBoundary() {
+	findLexicalBoundary(): ChildScope {
 		return this;
 	}
 
-	includeCallArguments(context: InclusionContext, args: (ExpressionNode | SpreadElement)[]): void {
-		super.includeCallArguments(context, args);
+	includeCallArguments(interaction: NodeInteractionCalled, context: InclusionContext): void {
+		super.includeCallArguments(interaction, context);
+		const { args } = interaction;
+		if (args[0]) {
+			this.thisVariable.includeArgumentPaths(args[0], context);
+		}
 		if (this.argumentsVariable.included) {
-			for (const arg of args) {
-				if (!arg.included) {
-					arg.include(context, false);
+			for (let argumentIndex = 1; argumentIndex < args.length; argumentIndex++) {
+				const argument = args[argumentIndex];
+				if (argument) {
+					argument.includePath(UNKNOWN_PATH, context);
+					argument.include(context, false);
 				}
 			}
 		}
+	}
+
+	protected addArgumentToBeDeoptimized(argument: ExpressionEntity) {
+		this.argumentsVariable.addArgumentToBeDeoptimized(argument);
 	}
 }

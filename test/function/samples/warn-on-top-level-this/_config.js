@@ -1,13 +1,13 @@
-const path = require('path');
-const assert = require('assert');
+const path = require('node:path');
+const { assertIncludes } = require('../../../testHelpers.js');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'warns on top-level this (#770)',
 	warnings: [
 		{
 			code: 'THIS_IS_UNDEFINED',
 			id: path.join(__dirname, 'main.js'),
-			message: `The 'this' keyword is equivalent to 'undefined' at the top level of an ES module, and has been rewritten`,
+			message: `main.js (3:0): The 'this' keyword is equivalent to 'undefined' at the top level of an ES module, and has been rewritten`,
 			pos: 81,
 			loc: {
 				file: path.join(__dirname, 'main.js'),
@@ -20,10 +20,11 @@ module.exports = {
 				3: this.foo = 'bar';
 				   ^
 			`,
-			url: `https://rollupjs.org/guide/en/#error-this-is-undefined`
+			url: `https://rollupjs.org/troubleshooting/#error-this-is-undefined`
 		}
 	],
-	runtimeError: err => {
-		assert.equal(err.message, `Cannot set property 'foo' of undefined`);
+	runtimeError: error => {
+		assertIncludes(error.message, 'Cannot set propert');
+		assertIncludes(error.message, "'foo'");
 	}
-};
+});

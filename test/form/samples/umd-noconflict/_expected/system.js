@@ -1,18 +1,18 @@
-System.register('FooBar', [], function (exports) {
+System.register('FooBar', [], (function (exports) {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
-			exports('doThings', doThings);
+			exports("doThings", doThings);
 
 			function doThings() {
 				console.log( 'doing things...' );
 			}
 
-			const number = exports('number', 42);
+			const number = exports("number", 42);
 
-			var setting = exports('setting', 'no');
+			var setting = exports("setting", 'no');
 
-		}
+		})
 	};
-});
+}));

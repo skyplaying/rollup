@@ -1,9 +1,9 @@
-System.register([], function (exports) {
+System.register([], (function (exports) {
   'use strict';
   return {
-    execute: function () {
+    execute: (function () {
 
-      exports('f', fn);
+      exports("f", fn);
 
       function fn$1 () {
         console.log('lib2 fn');
@@ -14,7 +14,7 @@ System.register([], function (exports) {
         console.log('dep2 fn');
       }
 
-    }
+    })
   };
-});
+}));
 //# sourceMappingURL=generated-dep2.js.map

@@ -1,10 +1,7 @@
-import './custom_modules/@my-scope/my-base-pkg/index.js';
-import { __exports as myBasePkg } from './_virtual/index.js_commonjs-exports';
+import { getDefaultExportFromCjs } from './_virtual/_commonjsHelpers.js';
+import { __require as requireUnderBuild } from './under-build2.js';
 
-const base = myBasePkg;
+var underBuildExports = requireUnderBuild();
+var underBuild = /*@__PURE__*/getDefaultExportFromCjs(underBuildExports);
 
-var underBuild = {
-	base
-};
-
-export default underBuild;
+export { underBuild as default };

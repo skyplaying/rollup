@@ -1,7 +1,5 @@
 'use strict';
 
-Object.defineProperty(exports, '__esModule', { value: true });
+const main = 'bar';
 
-const foo = 'bar';
-
-exports.foo = foo;
+exports.main = main;

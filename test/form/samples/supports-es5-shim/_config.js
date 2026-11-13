@@ -1,4 +1,4 @@
-module.exports = {
+module.exports = defineTest({
 	description: 'supports es5-shim',
 	options: {
 		onwarn(warning) {
@@ -6,7 +6,6 @@ module.exports = {
 				throw new Error(warning.message);
 			}
 		},
-		// TODO notable exception: Promise.resolve(thenable) not yet retained
 		// check against tree-shake: false when updating the shim
 		treeshake: true,
 		plugins: [
@@ -14,4 +13,4 @@ module.exports = {
 			require('@rollup/plugin-commonjs')()
 		]
 	}
-};
+});

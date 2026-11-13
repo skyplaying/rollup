@@ -1,24 +1,40 @@
-import { GlobalsOption } from '../../rollup/types';
-import { property } from './sanitize';
+import type { LogHandler } from 'rollup';
+import type { GlobalsOption } from '../../rollup/types';
+import type { GenerateCodeSnippets } from '../../utils/generateCodeSnippets';
+import { LOGLEVEL_WARN } from '../../utils/logging';
+import { logReservedNamespace } from '../../utils/logs';
 
 export default function setupNamespace(
 	name: string,
 	root: string,
 	globals: GlobalsOption,
-	compact: boolean | undefined
-) {
-	const _ = compact ? '' : ' ';
+	{ _, getPropertyAccess, s }: GenerateCodeSnippets,
+	compact: boolean | undefined,
+	log?: LogHandler
+): string {
 	const parts = name.split('.');
-	parts[0] = (typeof globals === 'function' ? globals(parts[0]) : globals[parts[0]]) || parts[0];
+	// Check if the key exists in the object's prototype.
+	const isReserved = parts[0] in Object.prototype;
+	if (log && isReserved) {
+		log(LOGLEVEL_WARN, logReservedNamespace(parts[0]));
+	}
+	parts[0] =
+		(typeof globals === 'function'
+			? globals(parts[0])
+			: isReserved
+				? parts[0]
+				: globals[parts[0]]) || parts[0];
+
 	parts.pop();
 
-	let acc = root;
+	let propertyPath = root;
 	return (
 		parts
-			.map(
-				part => ((acc += property(part)), `${acc}${_}=${_}${acc}${_}||${_}{}${compact ? '' : ';'}`)
-			)
-			.join(compact ? ',' : '\n') + (compact && parts.length ? ';' : '\n')
+			.map(part => {
+				propertyPath += getPropertyAccess(part);
+				return `${propertyPath}${_}=${_}${propertyPath}${_}||${_}{}${s}`;
+			})
+			.join(compact ? ',' : '\n') + (compact && parts.length > 0 ? ';' : '\n')
 	);
 }
 
@@ -26,20 +42,34 @@ export function assignToDeepVariable(
 	deepName: string,
 	root: string,
 	globals: GlobalsOption,
-	compact: boolean | undefined,
-	assignment: string
+	assignment: string,
+	{ _, getPropertyAccess }: GenerateCodeSnippets,
+	log?: LogHandler
 ): string {
-	const _ = compact ? '' : ' ';
 	const parts = deepName.split('.');
-	parts[0] = (typeof globals === 'function' ? globals(parts[0]) : globals[parts[0]]) || parts[0];
-	const last = parts.pop();
+	// Check if the key exists in the object's prototype.
+	const isReserved = parts[0] in Object.prototype;
+	if (log && isReserved) {
+		log(LOGLEVEL_WARN, logReservedNamespace(parts[0]));
+	}
+	parts[0] =
+		(typeof globals === 'function'
+			? globals(parts[0])
+			: isReserved
+				? parts[0]
+				: globals[parts[0]]) || parts[0];
 
-	let acc = root;
-	let deepAssignment = parts
-		.map(part => ((acc += property(part)), `${acc}${_}=${_}${acc}${_}||${_}{}`))
-		.concat(`${acc}${property(last!)}`)
-		.join(`,${_}`)
-		.concat(`${_}=${_}${assignment}`);
+	const last = parts.pop()!;
+
+	let propertyPath = root;
+	let deepAssignment =
+		[
+			...parts.map(part => {
+				propertyPath += getPropertyAccess(part);
+				return `${propertyPath}${_}=${_}${propertyPath}${_}||${_}{}`;
+			}),
+			`${propertyPath}${getPropertyAccess(last)}`
+		].join(`,${_}`) + `${_}=${_}${assignment}`;
 	if (parts.length > 0) {
 		deepAssignment = `(${deepAssignment})`;
 	}

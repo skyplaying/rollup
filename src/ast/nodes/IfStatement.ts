@@ -1,35 +1,38 @@
-import MagicString from 'magic-string';
-import { RenderOptions } from '../../utils/renderHelpers';
-import { removeAnnotations } from '../../utils/treeshakeNode';
-import { DeoptimizableEntity } from '../DeoptimizableEntity';
-import { BROKEN_FLOW_NONE, HasEffectsContext, InclusionContext } from '../ExecutionContext';
+import type MagicString from 'magic-string';
+import type { RenderOptions } from '../../utils/renderHelpers';
+import type { DeoptimizableEntity } from '../DeoptimizableEntity';
+import { type HasEffectsContext, type InclusionContext } from '../ExecutionContext';
 import TrackingScope from '../scopes/TrackingScope';
 import { EMPTY_PATH, SHARED_RECURSION_TRACKER } from '../utils/PathTracker';
-import { LiteralValueOrUnknown, UnknownValue } from '../values';
+import { tryCastLiteralValueToBoolean } from '../utils/tryCastLiteralValueToBoolean';
+import type Variable from '../variables/Variable';
 import BlockStatement from './BlockStatement';
-import Identifier from './Identifier';
+import type Identifier from './Identifier';
 import * as NodeType from './NodeType';
+import { type LiteralValueOrUnknown, UnknownValue } from './shared/Expression';
 import {
-	ExpressionNode,
-	GenericEsTreeNode,
-	IncludeChildren,
+	doNotDeoptimize,
+	type ExpressionNode,
+	type GenericEsTreeNode,
+	type IncludeChildren,
+	onlyIncludeSelfNoDeoptimize,
 	StatementBase,
-	StatementNode
+	type StatementNode
 } from './shared/Node';
 
 const unset = Symbol('unset');
 
 export default class IfStatement extends StatementBase implements DeoptimizableEntity {
-	alternate!: StatementNode | null;
-	consequent!: StatementNode;
-	test!: ExpressionNode;
-	type!: NodeType.tIfStatement;
+	declare alternate: StatementNode | null;
+	declare consequent: StatementNode;
+	declare test: ExpressionNode;
+	declare type: NodeType.tIfStatement;
 
-	private alternateScope?: TrackingScope;
-	private consequentScope!: TrackingScope;
+	declare alternateScope?: TrackingScope;
+	declare consequentScope: TrackingScope;
 	private testValue: LiteralValueOrUnknown | typeof unset = unset;
 
-	deoptimizeCache() {
+	deoptimizeCache(): void {
 		this.testValue = UnknownValue;
 	}
 
@@ -38,29 +41,26 @@ export default class IfStatement extends StatementBase implements DeoptimizableE
 			return true;
 		}
 		const testValue = this.getTestValue();
-		if (testValue === UnknownValue) {
+		if (typeof testValue === 'symbol') {
 			const { brokenFlow } = context;
 			if (this.consequent.hasEffects(context)) return true;
 			const consequentBrokenFlow = context.brokenFlow;
 			context.brokenFlow = brokenFlow;
 			if (this.alternate === null) return false;
 			if (this.alternate.hasEffects(context)) return true;
-			context.brokenFlow =
-				context.brokenFlow < consequentBrokenFlow ? context.brokenFlow : consequentBrokenFlow;
+			context.brokenFlow = context.brokenFlow && consequentBrokenFlow;
 			return false;
 		}
-		return testValue
-			? this.consequent.hasEffects(context)
-			: this.alternate !== null && this.alternate.hasEffects(context);
+		return testValue ? this.consequent.hasEffects(context) : !!this.alternate?.hasEffects(context);
 	}
 
-	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren) {
+	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren): void {
 		this.included = true;
 		if (includeChildrenRecursively) {
 			this.includeRecursively(includeChildrenRecursively, context);
 		} else {
 			const testValue = this.getTestValue();
-			if (testValue === UnknownValue) {
+			if (typeof testValue === 'symbol') {
 				this.includeUnknownTest(context);
 			} else {
 				this.includeKnownTest(context, testValue);
@@ -68,38 +68,42 @@ export default class IfStatement extends StatementBase implements DeoptimizableE
 		}
 	}
 
-	parseNode(esTreeNode: GenericEsTreeNode) {
-		this.consequentScope = new TrackingScope(this.scope);
-		this.consequent = new (this.context.nodeConstructors[esTreeNode.consequent.type] ||
-			this.context.nodeConstructors.UnknownNode)(esTreeNode.consequent, this, this.consequentScope);
+	parseNode(esTreeNode: GenericEsTreeNode): this {
+		this.consequent = new (this.scope.context.getNodeConstructor(esTreeNode.consequent.type))(
+			this,
+			(this.consequentScope = new TrackingScope(this.scope))
+		).parseNode(esTreeNode.consequent);
 		if (esTreeNode.alternate) {
-			this.alternateScope = new TrackingScope(this.scope);
-			this.alternate = new (this.context.nodeConstructors[esTreeNode.alternate.type] ||
-				this.context.nodeConstructors.UnknownNode)(esTreeNode.alternate, this, this.alternateScope);
+			this.alternate = new (this.scope.context.getNodeConstructor(esTreeNode.alternate.type))(
+				this,
+				(this.alternateScope = new TrackingScope(this.scope))
+			).parseNode(esTreeNode.alternate);
 		}
-		super.parseNode(esTreeNode);
+		return super.parseNode(esTreeNode);
 	}
 
-	render(code: MagicString, options: RenderOptions) {
+	render(code: MagicString, options: RenderOptions): void {
+		const {
+			snippets: { getPropertyAccess }
+		} = options;
 		// Note that unknown test values are always included
 		const testValue = this.getTestValue();
 		const hoistedDeclarations: Identifier[] = [];
 		const includesIfElse = this.test.included;
-		const noTreeshake = !this.context.options.treeshake;
+		const noTreeshake = !this.scope.context.options.treeshake;
 		if (includesIfElse) {
 			this.test.render(code, options);
 		} else {
-			removeAnnotations(this, code);
 			code.remove(this.start, this.consequent.start);
 		}
-		if (this.consequent.included && (noTreeshake || testValue === UnknownValue || testValue)) {
+		if (this.consequent.included && (noTreeshake || typeof testValue === 'symbol' || testValue)) {
 			this.consequent.render(code, options);
 		} else {
 			code.overwrite(this.consequent.start, this.consequent.end, includesIfElse ? ';' : '');
 			hoistedDeclarations.push(...this.consequentScope.hoistedDeclarations);
 		}
 		if (this.alternate) {
-			if (this.alternate.included && (noTreeshake || testValue === UnknownValue || !testValue)) {
+			if (this.alternate.included && (noTreeshake || typeof testValue === 'symbol' || !testValue)) {
 				if (includesIfElse) {
 					if (code.original.charCodeAt(this.alternate.start - 1) === 101) {
 						code.prependLeft(this.alternate.start, ' ');
@@ -117,15 +121,13 @@ export default class IfStatement extends StatementBase implements DeoptimizableE
 				hoistedDeclarations.push(...this.alternateScope!.hoistedDeclarations);
 			}
 		}
-		this.renderHoistedDeclarations(hoistedDeclarations, code);
+		this.renderHoistedDeclarations(hoistedDeclarations, code, getPropertyAccess);
 	}
 
 	private getTestValue(): LiteralValueOrUnknown {
 		if (this.testValue === unset) {
-			return (this.testValue = this.test.getLiteralValueAtPath(
-				EMPTY_PATH,
-				SHARED_RECURSION_TRACKER,
-				this
+			return (this.testValue = tryCastLiteralValueToBoolean(
+				this.test.getLiteralValueAtPath(EMPTY_PATH, SHARED_RECURSION_TRACKER, this)
 			));
 		}
 		return this.testValue;
@@ -136,10 +138,10 @@ export default class IfStatement extends StatementBase implements DeoptimizableE
 			this.test.include(context, false);
 		}
 		if (testValue && this.consequent.shouldBeIncluded(context)) {
-			this.consequent.includeAsSingleStatement(context, false);
+			this.consequent.include(context, false, { asSingleStatement: true });
 		}
-		if (this.alternate !== null && !testValue && this.alternate.shouldBeIncluded(context)) {
-			this.alternate.includeAsSingleStatement(context, false);
+		if (!testValue && this.alternate?.shouldBeIncluded(context)) {
+			this.alternate.include(context, false, { asSingleStatement: true });
 		}
 	}
 
@@ -149,46 +151,55 @@ export default class IfStatement extends StatementBase implements DeoptimizableE
 	) {
 		this.test.include(context, includeChildrenRecursively);
 		this.consequent.include(context, includeChildrenRecursively);
-		if (this.alternate !== null) {
-			this.alternate.include(context, includeChildrenRecursively);
-		}
+		this.alternate?.include(context, includeChildrenRecursively);
 	}
 
 	private includeUnknownTest(context: InclusionContext) {
 		this.test.include(context, false);
 		const { brokenFlow } = context;
-		let consequentBrokenFlow = BROKEN_FLOW_NONE;
+		let consequentBrokenFlow = false;
 		if (this.consequent.shouldBeIncluded(context)) {
-			this.consequent.includeAsSingleStatement(context, false);
+			this.consequent.include(context, false, { asSingleStatement: true });
 			consequentBrokenFlow = context.brokenFlow;
 			context.brokenFlow = brokenFlow;
 		}
-		if (this.alternate !== null && this.alternate.shouldBeIncluded(context)) {
-			this.alternate.includeAsSingleStatement(context, false);
-			context.brokenFlow =
-				context.brokenFlow < consequentBrokenFlow ? context.brokenFlow : consequentBrokenFlow;
+		if (this.alternate?.shouldBeIncluded(context)) {
+			this.alternate.include(context, false, { asSingleStatement: true });
+			context.brokenFlow = context.brokenFlow && consequentBrokenFlow;
 		}
 	}
 
-	private renderHoistedDeclarations(hoistedDeclarations: Identifier[], code: MagicString) {
-		const hoistedVars = [
+	private renderHoistedDeclarations(
+		hoistedDeclarations: readonly Identifier[],
+		code: MagicString,
+		getPropertyAccess: (name: string) => string
+	) {
+		const hoistedVariables = [
 			...new Set(
 				hoistedDeclarations.map(identifier => {
 					const variable = identifier.variable!;
-					return variable.included ? variable.getName() : '';
+					return this.shouldHoistVariable(variable) ? variable.getName(getPropertyAccess) : '';
 				})
 			)
 		]
 			.filter(Boolean)
 			.join(', ');
-		if (hoistedVars) {
+		if (hoistedVariables) {
 			const parentType = this.parent.type;
 			const needsBraces = parentType !== NodeType.Program && parentType !== NodeType.BlockStatement;
-			code.prependRight(this.start, `${needsBraces ? '{ ' : ''}var ${hoistedVars}; `);
+			code.prependRight(this.start, `${needsBraces ? '{ ' : ''}var ${hoistedVariables}; `);
 			if (needsBraces) {
 				code.appendLeft(this.end, ` }`);
 			}
 		}
+	}
+
+	private shouldHoistVariable(variable: Variable): boolean {
+		return (
+			variable.included &&
+			variable.renderBaseName === null &&
+			variable.getHoistedVariable()?.renderBaseName == null
+		);
 	}
 
 	private shouldKeepAlternateBranch() {
@@ -205,3 +216,6 @@ export default class IfStatement extends StatementBase implements DeoptimizableE
 		return false;
 	}
 }
+
+IfStatement.prototype.includeNode = onlyIncludeSelfNoDeoptimize;
+IfStatement.prototype.applyDeoptimizations = doNotDeoptimize;

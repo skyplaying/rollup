@@ -1,137 +1,238 @@
-import Module, { AstContext } from '../../Module';
-import { RenderOptions } from '../../utils/renderHelpers';
-import { RESERVED_NAMES } from '../../utils/reservedNames';
+import type { AstContext, default as Module } from '../../Module';
+import {
+	escapeExportName,
+	isNamespaceExportName,
+	unescapeExportName
+} from '../../utils/exportNames';
+import { stringifyObjectKeyIfNeeded } from '../../utils/identifierHelpers';
+import { getToStringTagValue, MERGE_NAMESPACES_VARIABLE } from '../../utils/interopHelpers';
+import type { RenderOptions } from '../../utils/renderHelpers';
 import { getSystemExportStatement } from '../../utils/systemJsRendering';
-import Identifier from '../nodes/Identifier';
-import { ObjectPath, UNKNOWN_PATH } from '../utils/PathTracker';
+import type { HasEffectsContext, InclusionContext } from '../ExecutionContext';
+import type { NodeInteraction } from '../NodeInteractions';
+import { INTERACTION_ASSIGNED, INTERACTION_CALLED } from '../NodeInteractions';
+import type { LiteralValueOrUnknown } from '../nodes/shared/Expression';
+import { deoptimizeInteraction, UnknownValue } from '../nodes/shared/Expression';
+import type IdentifierBase from '../nodes/shared/IdentifierBase';
+import type ChildScope from '../scopes/ChildScope';
+import type { EntityPathTracker, ObjectPath } from '../utils/PathTracker';
+import { SymbolToStringTag, UNKNOWN_PATH } from '../utils/PathTracker';
 import Variable from './Variable';
 
 export default class NamespaceVariable extends Variable {
-	context: AstContext;
-	isNamespace!: true;
-	module: Module;
+	readonly context: AstContext;
+	declare isNamespace: true;
+	readonly module: Module;
 
-	private memberVariables: { [name: string]: Variable } | null = null;
-	private mergedNamespaces: Variable[] = [];
+	private areAllMembersDeoptimized = false;
+	private mergedNamespaces: readonly Variable[] = [];
+	private nonExplicitNamespacesIncluded = false;
 	private referencedEarly = false;
-	private references: Identifier[] = [];
-	private syntheticNamedExports: boolean | string;
+	private readonly references: IdentifierBase[] = [];
 
-	constructor(context: AstContext, syntheticNamedExports: boolean | string) {
+	constructor(context: AstContext) {
 		super(context.getModuleName());
 		this.context = context;
 		this.module = context.module;
-		this.syntheticNamedExports = syntheticNamedExports;
 	}
 
-	addReference(identifier: Identifier) {
+	addReference(identifier: IdentifierBase): void {
 		this.references.push(identifier);
 		this.name = identifier.name;
 	}
 
-	deoptimizePath(path: ObjectPath) {
-		const memberVariables = this.getMemberVariables();
-		const memberPath = path.length <= 1 ? UNKNOWN_PATH : path.slice(1);
-		const key = path[0];
-		if (typeof key !== 'string') {
-			for (const key of Object.keys(memberVariables)) {
-				memberVariables[key].deoptimizePath(memberPath);
+	deoptimizeArgumentsOnInteractionAtPath(
+		interaction: NodeInteraction,
+		path: ObjectPath,
+		recursionTracker: EntityPathTracker
+	) {
+		if (path.length > 1 || (path.length === 1 && interaction.type === INTERACTION_CALLED)) {
+			const key = path[0];
+			if (typeof key === 'string') {
+				this.getMemberVariable(key)?.deoptimizeArgumentsOnInteractionAtPath(
+					interaction,
+					path.slice(1),
+					recursionTracker
+				);
+			} else {
+				deoptimizeInteraction(interaction);
 			}
-		} else {
-			memberVariables[key].deoptimizePath(memberPath);
 		}
 	}
 
-	getMemberVariables(): { [name: string]: Variable } {
-		if (this.memberVariables) {
-			return this.memberVariables;
-		}
-		const memberVariables: { [name: string]: Variable } = Object.create(null);
-		for (const name of this.context.getExports().concat(this.context.getReexports())) {
-			if (name[0] !== '*' && name !== this.module.info.syntheticNamedExports) {
-				const exportedVariable = this.context.traceExport(name);
-				if (exportedVariable) {
-					memberVariables[name] = exportedVariable;
+	deoptimizePath(path: ObjectPath) {
+		if (path.length > 1) {
+			const key = path[0];
+			if (typeof key === 'string') {
+				this.getMemberVariable(key)?.deoptimizePath(path.slice(1));
+			} else if (!this.areAllMembersDeoptimized) {
+				this.areAllMembersDeoptimized = true;
+				for (const variable of this.module.getExportedVariablesByName().values()) {
+					variable.deoptimizePath(UNKNOWN_PATH);
 				}
 			}
 		}
-		return (this.memberVariables = memberVariables);
 	}
 
-	include() {
-		this.included = true;
-		this.context.includeAllExports();
+	getLiteralValueAtPath(path: ObjectPath): LiteralValueOrUnknown {
+		if (path[0] === SymbolToStringTag) {
+			return 'Module';
+		}
+		return UnknownValue;
 	}
 
-	prepareNamespace(mergedNamespaces: Variable[]) {
-		this.mergedNamespaces = mergedNamespaces;
-		const moduleExecIndex = this.context.getModuleExecIndex();
-		for (const identifier of this.references) {
-			if (identifier.context.getModuleExecIndex() <= moduleExecIndex) {
-				this.referencedEarly = true;
-				break;
+	hasEffectsOnInteractionAtPath(
+		path: ObjectPath,
+		interaction: NodeInteraction,
+		context: HasEffectsContext
+	): boolean {
+		const { type } = interaction;
+		if (path.length === 0) {
+			// This can only be a call anyway
+			return true;
+		}
+		if (path.length === 1 && type !== INTERACTION_CALLED) {
+			return type === INTERACTION_ASSIGNED;
+		}
+		const key = path[0];
+		if (typeof key !== 'string') {
+			return true;
+		}
+		const memberVariable = this.getMemberVariable(key);
+		return (
+			!memberVariable ||
+			memberVariable.hasEffectsOnInteractionAtPath(path.slice(1), interaction, context)
+		);
+	}
+
+	includePath(path: ObjectPath, context: InclusionContext): void {
+		super.includePath(path, context);
+		this.includeMemberPath(path, context);
+	}
+
+	includeMemberPath(path: ObjectPath, context: InclusionContext): void {
+		if (path.length > 0) {
+			const [name, ...remainingPath] = path;
+			if (typeof name === 'string') {
+				const variable = this.getMemberVariable(name);
+				if (variable) {
+					this.context.includeVariableInModule(variable, remainingPath, context);
+				} else {
+					this.includeNonExplicitNamespaces();
+				}
+			} else if (name) {
+				this.module.includeAllExports();
+				this.includeNonExplicitNamespaces();
 			}
 		}
 	}
 
-	renderBlock(options: RenderOptions) {
-		const _ = options.compact ? '' : ' ';
-		const n = options.compact ? '' : '\n';
-		const t = options.indent;
+	prepare(accessedGlobalsByScope: Map<ChildScope, Set<string>>): void {
+		if (this.mergedNamespaces.length > 0) {
+			this.module.scope.addAccessedGlobals([MERGE_NAMESPACES_VARIABLE], accessedGlobalsByScope);
+		}
+	}
 
-		const memberVariables = this.getMemberVariables();
-		const members = Object.keys(memberVariables).map(name => {
-			const original = memberVariables[name];
+	renderBlock(options: RenderOptions): string {
+		const {
+			exportNamesByVariable,
+			format,
+			freeze,
+			indent: t,
+			symbols,
+			snippets: { _, cnst, getObject, getPropertyAccess, n, s }
+		} = options;
+		const memberVariables = this.module.getExportedVariablesByName();
+		const members: [key: string | null, value: string][] = [...memberVariables.entries()]
+			.filter(([name, variable]) => !isNamespaceExportName(name) && variable.included)
+			.map(([name, variable]) => {
+				const key = unescapeExportName(name);
+				if (
+					this.referencedEarly ||
+					variable.isReassigned ||
+					variable === this ||
+					(variable.module &&
+						!variable.module.info.isExternal &&
+						variable.module.execIndex > this.module.execIndex)
+				) {
+					return [
+						null,
+						`get ${stringifyObjectKeyIfNeeded(key)}${_}()${_}{${_}return ${variable.getName(
+							getPropertyAccess
+						)}${s}${_}}`
+					];
+				}
 
-			if (this.referencedEarly || original.isReassigned) {
-				return `${t}get ${name}${_}()${_}{${_}return ${original.getName()}${
-					options.compact ? '' : ';'
-				}${_}}`;
+				return [key, variable.getName(getPropertyAccess)];
+			});
+		members.unshift([null, `__proto__:${_}null`]);
+
+		let output = getObject(members, { lineBreakIndent: { base: '', t } });
+		if (this.mergedNamespaces.length > 0) {
+			const assignmentArguments = this.mergedNamespaces.map(variable =>
+				variable.getName(getPropertyAccess)
+			);
+			output = `/*#__PURE__*/${MERGE_NAMESPACES_VARIABLE}(${output},${_}[${assignmentArguments.join(
+				`,${_}`
+			)}])`;
+		} else {
+			// The helper to merge namespaces will also take care of freezing and toStringTag
+			if (symbols) {
+				output = `/*#__PURE__*/Object.defineProperty(${output},${_}Symbol.toStringTag,${_}${getToStringTagValue(
+					getObject
+				)})`;
 			}
-
-			const safeName = RESERVED_NAMES[name] ? `'${name}'` : name;
-
-			return `${t}${safeName}: ${original.getName()}`;
-		});
-
-		if (options.namespaceToStringTag) {
-			members.unshift(`${t}[Symbol.toStringTag]:${_}'Module'`);
+			if (freeze) {
+				output = `/*#__PURE__*/Object.freeze(${output})`;
+			}
 		}
 
-		const needsObjectAssign = this.mergedNamespaces.length > 0 || this.syntheticNamedExports;
-		if (!needsObjectAssign) members.unshift(`${t}__proto__:${_}null`);
+		const name = this.getName(getPropertyAccess);
+		output = `${cnst} ${name}${_}=${_}${output};`;
 
-		let output = `{${n}${members.join(`,${n}`)}${n}}`;
-		if (needsObjectAssign) {
-			const assignmentArgs: string[] = ['/*#__PURE__*/Object.create(null)'];
-			if (this.mergedNamespaces.length > 0) {
-				assignmentArgs.push(...this.mergedNamespaces.map(variable => variable.getName()));
-			}
-			if (this.syntheticNamedExports) {
-				assignmentArgs.push(this.module.getSyntheticNamespace().getName());
-			}
-			if (members.length > 0) {
-				assignmentArgs.push(output);
-			}
-			output = `/*#__PURE__*/Object.assign(${assignmentArgs.join(`,${_}`)})`;
-		}
-		if (options.freeze) {
-			output = `/*#__PURE__*/Object.freeze(${output})`;
-		}
-
-		const name = this.getName();
-		output = `${options.varOrConst} ${name}${_}=${_}${output};`;
-
-		if (options.format === 'system' && options.exportNamesByVariable.has(this)) {
+		if (format === 'system' && exportNamesByVariable.has(this)) {
 			output += `${n}${getSystemExportStatement([this], options)};`;
 		}
 
 		return output;
 	}
 
-	renderFirst() {
+	renderFirst(): boolean {
 		return this.referencedEarly;
+	}
+
+	setMergedNamespaces(mergedNamespaces: readonly Variable[]): void {
+		this.mergedNamespaces = mergedNamespaces;
+		const moduleExecIndex = this.context.getModuleExecIndex();
+		for (const identifier of this.references) {
+			const { context } = identifier.scope;
+			if (context.getModuleExecIndex() <= moduleExecIndex) {
+				this.referencedEarly = true;
+				break;
+			}
+		}
+	}
+
+	private getMemberVariable(name: string): Variable | undefined {
+		return this.module.getExportedVariablesByName().get(escapeExportName(name));
+	}
+
+	private includeNonExplicitNamespaces(): void {
+		if (!this.nonExplicitNamespacesIncluded) {
+			this.nonExplicitNamespacesIncluded = true;
+			this.setMergedNamespaces(this.module.includeAndGetAdditionalMergedNamespaces());
+		}
 	}
 }
 
 NamespaceVariable.prototype.isNamespace = true;
+
+// This is a proxy that does not include the namespace object when a path is included
+export const getDynamicNamespaceVariable = (namespace: NamespaceVariable): NamespaceVariable =>
+	Object.create(namespace, {
+		includePath: {
+			value(path: ObjectPath, context: InclusionContext): void {
+				namespace.includeMemberPath(path, context);
+			}
+		}
+	});

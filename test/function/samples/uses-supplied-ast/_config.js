@@ -18,9 +18,11 @@ const modules = {
 
 	baz: 'export default 42;'
 };
+modules.foo.ast._ignoredProp = {};
 
-module.exports = {
+module.exports = defineTest({
 	description: 'uses supplied AST',
+	verifyAst: false,
 	options: {
 		plugins: [
 			{
@@ -38,4 +40,4 @@ module.exports = {
 			}
 		]
 	}
-};
+});

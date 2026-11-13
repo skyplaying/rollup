@@ -1,11 +1,11 @@
-const { assertIncludes } = require('../../../utils.js');
+const { assertIncludes } = require('../../../testHelpers.js');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'displays warnings when a config is loaded',
-	command: 'rollup -c',
+	spawnArgs: ['-c', '--bundleConfigAsCjs'],
 	stderr: stderr =>
 		assertIncludes(
 			stderr,
 			'loaded rollup.config.js with warnings\n(!) Use of eval is strongly discouraged'
 		)
-};
+});

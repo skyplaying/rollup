@@ -1,106 +1,152 @@
-import ExternalModule from '../../ExternalModule';
-import Module from '../../Module';
-import { RESERVED_NAMES } from '../../utils/reservedNames';
-import { CallOptions } from '../CallOptions';
-import { DeoptimizableEntity } from '../DeoptimizableEntity';
-import { HasEffectsContext, InclusionContext } from '../ExecutionContext';
-import Identifier from '../nodes/Identifier';
+import type ExternalModule from '../../ExternalModule';
+import type Module from '../../Module';
+import type { RenderOptions } from '../../utils/renderHelpers';
+import type { HasEffectsContext, InclusionContext } from '../ExecutionContext';
+import type { NodeInteraction } from '../NodeInteractions';
+import { INTERACTION_ACCESSED } from '../NodeInteractions';
+import type CallExpression from '../nodes/CallExpression';
+import * as NodeType from '../nodes/NodeType';
 import { ExpressionEntity } from '../nodes/shared/Expression';
-import { ExpressionNode } from '../nodes/shared/Node';
-import SpreadElement from '../nodes/SpreadElement';
-import { ObjectPath, PathTracker } from '../utils/PathTracker';
-import { LiteralValueOrUnknown, UnknownValue, UNKNOWN_EXPRESSION } from '../values';
+import type IdentifierBase from '../nodes/shared/IdentifierBase';
+import type { NodeBase } from '../nodes/shared/Node';
+import type { VariableKind } from '../nodes/shared/VariableKinds';
+import type { ObjectPath } from '../utils/PathTracker';
 
-export default class Variable implements ExpressionEntity {
+export default class Variable extends ExpressionEntity {
 	alwaysRendered = false;
-	included = false;
+	forbiddenNames: Set<string> | null = null;
+	globalName: string | null = null;
+	initReached = false;
 	isId = false;
 	// both NamespaceVariable and ExternalVariable can be namespaces
-	isNamespace?: boolean;
-	isReassigned = false;
-	module?: Module | ExternalModule;
-	name: string;
+	declare isNamespace?: boolean;
+	kind: VariableKind | null = null;
+	declare module?: Module | ExternalModule;
 	renderBaseName: string | null = null;
 	renderName: string | null = null;
 
-	constructor(name: string) {
-		this.name = name;
+	private renderedLikeHoisted?: Variable;
+
+	readonly isReassigned = false;
+	markReassigned() {
+		(this as { isReassigned: boolean }).isReassigned = true;
+	}
+
+	// Unlike isReassigned, set eagerly during binding for every assignment,
+	// including ones that are never included
+	readonly isTargetOfAssignment = false;
+	markTargetOfAssignment() {
+		(this as { isTargetOfAssignment: boolean }).isTargetOfAssignment = true;
+	}
+
+	constructor(public name: string) {
+		super();
 	}
 
 	/**
 	 * Binds identifiers that reference this variable to this variable.
 	 * Necessary to be able to change variable names.
 	 */
-	addReference(_identifier: Identifier) {}
+	addReference(_identifier: IdentifierBase): void {}
 
-	deoptimizePath(_path: ObjectPath) {}
-
-	getBaseVariableName(): string {
-		return this.renderBaseName || this.renderName || this.name;
-	}
-
-	getLiteralValueAtPath(
-		_path: ObjectPath,
-		_recursionTracker: PathTracker,
-		_origin: DeoptimizableEntity
-	): LiteralValueOrUnknown {
-		return UnknownValue;
-	}
-
-	getName(): string {
-		const name = this.renderName || this.name;
-		return this.renderBaseName
-			? `${this.renderBaseName}${RESERVED_NAMES[name] ? `['${name}']` : `.${name}`}`
-			: name;
-	}
-
-	getReturnExpressionWhenCalledAtPath(
-		_path: ObjectPath,
-		_recursionTracker: PathTracker,
-		_origin: DeoptimizableEntity
-	): ExpressionEntity {
-		return UNKNOWN_EXPRESSION;
-	}
-
-	hasEffectsWhenAccessedAtPath(path: ObjectPath, _context: HasEffectsContext) {
-		return path.length > 0;
-	}
-
-	hasEffectsWhenAssignedAtPath(_path: ObjectPath, _context: HasEffectsContext) {
-		return true;
-	}
-
-	hasEffectsWhenCalledAtPath(
-		_path: ObjectPath,
-		_callOptions: CallOptions,
-		_context: HasEffectsContext
-	) {
-		return true;
+	private onlyFunctionCallUsed = true;
+	/**
+	 * Check if the identifier variable is only used as function call
+	 * @returns true if the variable is only used as function call
+	 */
+	getOnlyFunctionCallUsed(): boolean {
+		return this.onlyFunctionCallUsed;
 	}
 
 	/**
-	 * Marks this variable as being part of the bundle, which is usually the case when one of
-	 * its identifiers becomes part of the bundle. Returns true if it has not been included
-	 * previously.
-	 * Once a variable is included, it should take care all its declarations are included.
+	 * Collect the places where the identifier variable is used
+	 * @param usedPlace Where the variable is used
 	 */
-	include() {
-		this.included = true;
-	}
-
-	includeCallArguments(context: InclusionContext, args: (ExpressionNode | SpreadElement)[]): void {
-		for (const arg of args) {
-			arg.include(context, false);
+	addUsedPlace(usedPlace: NodeBase): void {
+		const isFunctionCall =
+			usedPlace.parent.type === NodeType.CallExpression &&
+			(usedPlace.parent as CallExpression).callee === usedPlace;
+		if (!isFunctionCall && usedPlace.parent.type !== NodeType.ExportDefaultDeclaration) {
+			this.onlyFunctionCallUsed = false;
 		}
 	}
 
-	markCalledFromTryStatement() {}
-
-	mayModifyThisWhenCalledAtPath(_path: ObjectPath, _recursionTracker: PathTracker) {
-		return true;
+	/**
+	 * Prevent this variable from being renamed to this name to avoid name
+	 * collisions
+	 */
+	forbidName(name: string) {
+		(this.forbiddenNames ||= new Set()).add(name);
 	}
 
-	setRenderNames(baseName: string | null, name: string | null) {
+	getBaseVariableName(): string {
+		return (
+			this.getNamingVariable()?.getBaseVariableName() ||
+			this.renderBaseName ||
+			this.renderName ||
+			this.name
+		);
+	}
+
+	getName(
+		getPropertyAccess: (name: string) => string,
+		useOriginalName?: RenderOptions['useOriginalName']
+	): string {
+		if (this.globalName) {
+			return this.globalName;
+		}
+		if (useOriginalName?.(this)) {
+			return this.name;
+		}
+		const namingVariable = this.getNamingVariable();
+		if (namingVariable) {
+			return namingVariable.getName(getPropertyAccess, useOriginalName);
+		}
+		const name = this.renderName || this.name;
+		return this.renderBaseName ? `${this.renderBaseName}${getPropertyAccess(name)}` : name;
+	}
+
+	hasEffectsOnInteractionAtPath(
+		path: ObjectPath,
+		{ type }: NodeInteraction,
+		_context: HasEffectsContext
+	): boolean {
+		return type !== INTERACTION_ACCESSED || path.length > 0;
+	}
+
+	/**
+	 * Marks this variable as being part of the bundle, which is usually the case
+	 * when one of its identifiers becomes part of the bundle. Returns true if it
+	 * has not been included previously. Once a variable is included, it should
+	 * take care all its declarations are included.
+	 */
+	includePath(path: ObjectPath, context: InclusionContext): void {
+		this.included = true;
+		this.renderedLikeHoisted?.includePath(path, context);
+	}
+
+	/**
+	 * Links this variable to a hoisted variable. Including this variable then
+	 * includes the hoisted variable, and while the hoisted variable renders as an
+	 * identifier, this variable renders with its name.
+	 */
+	renderLikeHoisted(variable: Variable): void {
+		this.renderedLikeHoisted = variable;
+	}
+
+	getHoistedVariable(): Variable | undefined {
+		return this.renderedLikeHoisted;
+	}
+
+	private getNamingVariable(): Variable | undefined {
+		return this.renderedLikeHoisted?.renderBaseName === null ? this.renderedLikeHoisted : undefined;
+	}
+
+	markCalledFromTryStatement(): void {}
+
+	addReassignedValue(_value: ExpressionEntity): void {}
+
+	setRenderNames(baseName: string | null, name: string | null): void {
 		this.renderBaseName = baseName;
 		this.renderName = name;
 	}

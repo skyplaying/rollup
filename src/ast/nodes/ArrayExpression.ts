@@ -1,44 +1,121 @@
-import { CallOptions } from '../CallOptions';
-import { HasEffectsContext } from '../ExecutionContext';
-import { ObjectPath, UNKNOWN_PATH } from '../utils/PathTracker';
+import type { DeoptimizableEntity } from '../DeoptimizableEntity';
+import type { HasEffectsContext, InclusionContext } from '../ExecutionContext';
+import type { NodeInteraction, NodeInteractionCalled } from '../NodeInteractions';
 import {
-	arrayMembers,
-	getMemberReturnExpressionWhenCalled,
-	hasMemberEffectWhenCalled,
-	UNKNOWN_EXPRESSION
-} from '../values';
-import * as NodeType from './NodeType';
-import { ExpressionNode, NodeBase } from './shared/Node';
+	type EntityPathTracker,
+	type ObjectPath,
+	UNKNOWN_INTEGER_PATH,
+	UNKNOWN_PATH,
+	UnknownInteger
+} from '../utils/PathTracker';
+import { UNDEFINED_EXPRESSION, UNKNOWN_LITERAL_NUMBER } from '../values';
+import type * as NodeType from './NodeType';
+import { ARRAY_PROTOTYPE } from './shared/ArrayPrototype';
+import type { ExpressionEntity, LiteralValueOrUnknown } from './shared/Expression';
+import { type ExpressionNode, NodeBase } from './shared/Node';
+import { ObjectEntity, type ObjectProperty } from './shared/ObjectEntity';
 import SpreadElement from './SpreadElement';
 
 export default class ArrayExpression extends NodeBase {
-	elements!: (ExpressionNode | SpreadElement | null)[];
-	type!: NodeType.tArrayExpression;
+	declare elements: readonly (ExpressionNode | SpreadElement | null)[];
+	declare type: NodeType.tArrayExpression;
+	private objectEntity: ObjectEntity | null = null;
 
-	bind() {
-		super.bind();
-		for (const element of this.elements) {
-			if (element !== null) element.deoptimizePath(UNKNOWN_PATH);
+	deoptimizeArgumentsOnInteractionAtPath(
+		interaction: NodeInteraction,
+		path: ObjectPath,
+		recursionTracker: EntityPathTracker
+	): void {
+		this.getObjectEntity().deoptimizeArgumentsOnInteractionAtPath(
+			interaction,
+			path,
+			recursionTracker
+		);
+	}
+
+	deoptimizePath(path: ObjectPath): void {
+		const objectEntity = this.getObjectEntity();
+		objectEntity.deoptimizePath(path);
+		// Writing the length can remove elements or add holes
+		if (path.length === 1 && path[0] === 'length') {
+			objectEntity.deoptimizePath(UNKNOWN_INTEGER_PATH);
 		}
 	}
 
-	getReturnExpressionWhenCalledAtPath(path: ObjectPath) {
-		if (path.length !== 1) return UNKNOWN_EXPRESSION;
-		return getMemberReturnExpressionWhenCalled(arrayMembers, path[0]);
-	}
-
-	hasEffectsWhenAccessedAtPath(path: ObjectPath) {
-		return path.length > 1;
-	}
-
-	hasEffectsWhenCalledAtPath(
+	getLiteralValueAtPath(
 		path: ObjectPath,
-		callOptions: CallOptions,
+		recursionTracker: EntityPathTracker,
+		origin: DeoptimizableEntity
+	): LiteralValueOrUnknown {
+		return this.getObjectEntity().getLiteralValueAtPath(path, recursionTracker, origin);
+	}
+
+	getReturnExpressionWhenCalledAtPath(
+		path: ObjectPath,
+		interaction: NodeInteractionCalled,
+		recursionTracker: EntityPathTracker,
+		origin: DeoptimizableEntity
+	): [expression: ExpressionEntity, isPure: boolean] {
+		return this.getObjectEntity().getReturnExpressionWhenCalledAtPath(
+			path,
+			interaction,
+			recursionTracker,
+			origin
+		);
+	}
+
+	hasEffectsOnInteractionAtPath(
+		path: ObjectPath,
+		interaction: NodeInteraction,
 		context: HasEffectsContext
 	): boolean {
-		if (path.length === 1) {
-			return hasMemberEffectWhenCalled(arrayMembers, path[0], this.included, callOptions, context);
+		return this.getObjectEntity().hasEffectsOnInteractionAtPath(path, interaction, context);
+	}
+
+	includeNode(context: InclusionContext) {
+		this.included = true;
+		if (!this.deoptimized) this.applyDeoptimizations();
+		for (const element of this.elements) {
+			if (element) {
+				element?.includePath(UNKNOWN_PATH, context);
+			}
 		}
-		return true;
+	}
+
+	applyDeoptimizations() {
+		this.deoptimized = true;
+		let hasSpread = false;
+		for (let index = 0; index < this.elements.length; index++) {
+			const element = this.elements[index];
+			if (element && (hasSpread || element instanceof SpreadElement)) {
+				hasSpread = true;
+				element.deoptimizePath(UNKNOWN_PATH);
+			}
+		}
+		this.scope.context.requestTreeshakingPass();
+	}
+
+	private getObjectEntity(): ObjectEntity {
+		if (this.objectEntity !== null) {
+			return this.objectEntity;
+		}
+		const properties: ObjectProperty[] = [
+			{ key: 'length', kind: 'init', property: UNKNOWN_LITERAL_NUMBER }
+		];
+		let hasSpread = false;
+		for (let index = 0; index < this.elements.length; index++) {
+			const element = this.elements[index];
+			if (hasSpread || element instanceof SpreadElement) {
+				if (element) {
+					hasSpread = true;
+					properties.unshift({ key: UnknownInteger, kind: 'init', property: element });
+				}
+			} else if (element) {
+				properties.push({ key: String(index), kind: 'init', property: element });
+			} else {
+				properties.push({ key: String(index), kind: 'init', property: UNDEFINED_EXPRESSION });
+			}
+		}
+		return (this.objectEntity = new ObjectEntity(properties, ARRAY_PROTOTYPE));
 	}
 }

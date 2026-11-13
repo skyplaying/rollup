@@ -1,37 +1,160 @@
-import { CallOptions } from '../../CallOptions';
-import { DeoptimizableEntity } from '../../DeoptimizableEntity';
-import { WritableEntity } from '../../Entity';
-import { HasEffectsContext, InclusionContext } from '../../ExecutionContext';
-import { ObjectPath, PathTracker } from '../../utils/PathTracker';
-import { LiteralValueOrUnknown } from '../../values';
-import SpreadElement from '../SpreadElement';
-import { ExpressionNode, IncludeChildren } from './Node';
+import type { DeoptimizableEntity } from '../../DeoptimizableEntity';
+import type { WritableEntity } from '../../Entity';
+import type { HasEffectsContext, InclusionContext } from '../../ExecutionContext';
+import type { NodeInteraction, NodeInteractionCalled } from '../../NodeInteractions';
+import type {
+	EntityPathTracker,
+	ObjectPath,
+	UnknownWellKnown,
+	WellKnownSymbol
+} from '../../utils/PathTracker';
+import { UNKNOWN_PATH } from '../../utils/PathTracker';
+import type { LiteralValue } from '../Literal';
+import { Flag, isFlagSet, setFlag } from './BitFlags';
+import type FunctionBase from './FunctionBase';
+import type { IncludeChildren } from './Node';
 
-export interface ExpressionEntity extends WritableEntity {
-	included: boolean;
+export const UnknownValue = Symbol('Unknown Value');
+export const UnknownTruthyValue = Symbol('Unknown Truthy Value');
+export const UnknownFalsyValue = Symbol('Unknown Falsy Value');
+
+export type LiteralValueOrUnknown =
+	| LiteralValue
+	| typeof UnknownValue
+	| typeof UnknownWellKnown
+	| typeof UnknownTruthyValue
+	| typeof UnknownFalsyValue
+	| WellKnownSymbol;
+
+export interface InclusionOptions {
+	/**
+	 * Include the id of a declarator even if unused to ensure it is a valid
+	 * statement.
+	 */
+	asSingleStatement?: boolean;
+}
+
+export class ExpressionEntity implements WritableEntity {
+	protected flags = 0;
+
+	get included(): boolean {
+		return isFlagSet(this.flags, Flag.included);
+	}
+	set included(value: boolean) {
+		this.flags = setFlag(this.flags, Flag.included, value);
+	}
+
+	deoptimizeArgumentsOnInteractionAtPath(
+		interaction: NodeInteraction,
+		_path: ObjectPath,
+		_recursionTracker: EntityPathTracker
+	): void {
+		deoptimizeInteraction(interaction);
+	}
+
+	deoptimizePath(_path: ObjectPath): void {}
+
+	getKnownFunctionAtPath(
+		_path: ObjectPath,
+		_recursionTracker: EntityPathTracker,
+		_origin: DeoptimizableEntity
+	): FunctionBase | null {
+		return null;
+	}
 
 	/**
-	 * If possible it returns a stringifyable literal value for this node that can be used
-	 * for inlining or comparing values.
-	 * Otherwise it should return UnknownValue.
+	 * If possible it returns a stringifyable literal value for this node that
+	 * can be used for inlining or comparing values. Otherwise, it should return
+	 * UnknownValue.
 	 */
 	getLiteralValueAtPath(
-		path: ObjectPath,
-		recursionTracker: PathTracker,
-		origin: DeoptimizableEntity
-	): LiteralValueOrUnknown;
+		_path: ObjectPath,
+		_recursionTracker: EntityPathTracker,
+		_origin: DeoptimizableEntity
+	): LiteralValueOrUnknown {
+		return UnknownValue;
+	}
+
 	getReturnExpressionWhenCalledAtPath(
-		path: ObjectPath,
-		recursionTracker: PathTracker,
-		origin: DeoptimizableEntity
-	): ExpressionEntity;
-	hasEffectsWhenAccessedAtPath(path: ObjectPath, context: HasEffectsContext): boolean;
-	hasEffectsWhenCalledAtPath(
-		path: ObjectPath,
-		callOptions: CallOptions,
-		context: HasEffectsContext
-	): boolean;
-	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren): void;
-	includeCallArguments(context: InclusionContext, args: (ExpressionNode | SpreadElement)[]): void;
-	mayModifyThisWhenCalledAtPath(path: ObjectPath, recursionTracker: PathTracker): boolean;
+		_path: ObjectPath,
+		_interaction: NodeInteractionCalled,
+		_recursionTracker: EntityPathTracker,
+		_origin: DeoptimizableEntity
+	): [expression: ExpressionEntity, isPure: boolean] {
+		return UNKNOWN_RETURN_EXPRESSION;
+	}
+
+	hasEffectsOnInteractionAtPath(
+		_path: ObjectPath,
+		_interaction: NodeInteraction,
+		_context: HasEffectsContext
+	): boolean {
+		return true;
+	}
+
+	include(
+		context: InclusionContext,
+		_includeChildrenRecursively: IncludeChildren,
+		_options?: InclusionOptions
+	): void {
+		if (!this.included) this.includeNode(context);
+	}
+
+	includeNode(_context: InclusionContext): void {
+		this.included = true;
+	}
+
+	includePath(_path: ObjectPath, context: InclusionContext): void {
+		if (!this.included) this.includeNode(context);
+	}
+
+	includeCallArgumentsWhenCalledAtPath(
+		_path: ObjectPath,
+		interaction: NodeInteractionCalled,
+		context: InclusionContext
+	): void {
+		includeInteraction(interaction, context);
+	}
+
+	shouldBeIncluded(_context: InclusionContext): boolean {
+		return true;
+	}
 }
+
+export const UNKNOWN_EXPRESSION: ExpressionEntity =
+	new (class UnknownExpression extends ExpressionEntity {})();
+
+export const UNKNOWN_RETURN_EXPRESSION: [expression: ExpressionEntity, isPure: boolean] = [
+	UNKNOWN_EXPRESSION,
+	false
+];
+
+export const deoptimizeInteraction = (interaction: NodeInteraction) => {
+	for (const argument of interaction.args) {
+		argument?.deoptimizePath(UNKNOWN_PATH);
+	}
+};
+
+export const includeInteraction = (interaction: NodeInteraction, context: InclusionContext) => {
+	// We do not re-include the "this" argument as we expect this is already
+	// re-included at the call site
+	interaction.args[0]?.includePath(UNKNOWN_PATH, context);
+	includeInteractionWithoutThis(interaction, context);
+};
+
+/* We are running both include() and includePath(UNKNOWN_PATH) here as the former
+ * ensures that nested nodes are included while the latter ensures that all
+ * paths of the expression are included.
+ * */
+export const includeInteractionWithoutThis = (
+	{ args }: NodeInteraction,
+	context: InclusionContext
+) => {
+	for (let argumentIndex = 1; argumentIndex < args.length; argumentIndex++) {
+		const argument = args[argumentIndex];
+		if (argument) {
+			argument.includePath(UNKNOWN_PATH, context);
+			argument.include(context, false);
+		}
+	}
+};

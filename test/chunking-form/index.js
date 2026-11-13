@@ -1,64 +1,86 @@
-const path = require('path');
-const rollup = require('../../dist/rollup');
-const { runTestSuiteWithSamples, assertDirectoriesAreEqual } = require('../utils.js');
+const path = require('node:path');
+/**
+ * @type {import('../../src/rollup/types')} Rollup
+ */
+// @ts-expect-error not included in types
+const { rollup } = require('../../dist/rollup');
+const { compareLogs } = require('../testHelpers');
+const {
+	runTestSuiteWithSamples,
+	assertDirectoriesAreEqual,
+	shuffle
+} = require('../testHelpers.js');
 
 const FORMATS = ['es', 'cjs', 'amd', 'system'];
 
-runTestSuiteWithSamples('chunking form', path.resolve(__dirname, 'samples'), (dir, config) => {
-	(config.skip ? describe.skip : config.solo ? describe.only : describe)(
-		path.basename(dir) + ': ' + config.description,
-		() => {
-			let bundle;
+runTestSuiteWithSamples(
+	'chunking form',
+	path.resolve(__dirname, 'samples'),
+	(directory, config) => {
+		(config.skip ? describe.skip : config.solo ? describe.only : describe)(
+			path.basename(directory) + ': ' + config.description,
+			() => {
+				let bundle;
 
-			for (const format of FORMATS) {
-				it('generates ' + format, async () => {
-					process.chdir(dir);
-					bundle =
-						bundle ||
-						(await rollup.rollup(
-							Object.assign(
-								{
-									input: [dir + '/main.js'],
-									onwarn: warning => {
-										if (
-											!(
-												config.expectedWarnings &&
-												config.expectedWarnings.indexOf(warning.code) >= 0
-											)
-										) {
-											throw new Error(
-												`Unexpected warnings (${warning.code}): ${warning.message}\n` +
-													'If you expect warnings, list their codes in config.expectedWarnings'
-											);
-										}
-									},
-									strictDeprecations: true
+				if (config.before) {
+					before(config.before);
+				}
+				if (config.after) {
+					after(config.after);
+				}
+				const logs = [];
+				const warnings = [];
+				after(() => config.logs && compareLogs(logs, config.logs));
+
+				for (const format of shuffle(config.formats || FORMATS)) {
+					it('generates ' + format, async () => {
+						process.chdir(directory);
+						bundle =
+							bundle ||
+							(await rollup({
+								input: [directory + '/main.js'],
+								onLog: (level, log) => {
+									logs.push({ level, ...log });
+									if (level === 'warn' && !config.expectedWarnings?.includes(log.code)) {
+										warnings.push(log);
+									}
 								},
-								config.options || {}
-							)
-						));
-					await generateAndTestBundle(
-						bundle,
-						Object.assign(
+								strictDeprecations: true,
+								...config.options
+							}));
+						await generateAndTestBundle(
+							bundle,
 							{
-								dir: `${dir}/_actual/${format}`,
+								dir: `${directory}/_actual/${format}`,
 								exports: 'auto',
 								format,
 								chunkFileNames: 'generated-[name].js',
-								validate: true
+								validate: true,
+								...(config.options || {}).output
 							},
-							(config.options || {}).output || {}
-						),
-						`${dir}/_expected/${format}`,
-						config
-					);
-				});
+							`${directory}/_expected/${format}`,
+							config
+						);
+						if (warnings.length > 0) {
+							const codes = new Set();
+							for (const { code } of warnings) {
+								codes.add(code);
+							}
+							const messages = warnings.map(({ message }) => `${message}\n\n`).join('');
+							warnings.length = 0;
+							throw new Error(
+								`Unexpected warnings (${[...codes].join(', ')}): \n${messages}` +
+									'If you expect warnings, list their codes in config.expectedWarnings'
+							);
+						}
+					});
+				}
 			}
-		}
-	);
-});
+		);
+	}
+);
 
-async function generateAndTestBundle(bundle, outputOptions, expectedDir, config) {
+async function generateAndTestBundle(bundle, outputOptions, expectedDirectory, config) {
 	await bundle.write({
 		...outputOptions,
 		dir: `${outputOptions.dir}${config.nestedDir ? '/' + config.nestedDir : ''}`
@@ -66,7 +88,7 @@ async function generateAndTestBundle(bundle, outputOptions, expectedDir, config)
 	if (outputOptions.format === 'amd' && config.runAmd) {
 		try {
 			const exports = await new Promise((resolve, reject) => {
-				global.assert = require('assert');
+				global.assert = require('node:assert');
 				const requirejs = require('requirejs');
 				requirejs.config({ baseUrl: outputOptions.dir });
 				requirejs([config.nestedDir ? `${config.nestedDir}/main` : 'main'], resolve, reject);
@@ -80,5 +102,5 @@ async function generateAndTestBundle(bundle, outputOptions, expectedDir, config)
 			delete global.assert;
 		}
 	}
-	assertDirectoriesAreEqual(outputOptions.dir, expectedDir);
+	assertDirectoriesAreEqual(outputOptions.dir, expectedDirectory);
 }

@@ -1,6 +1,6 @@
-const path = require('path');
+const path = require('node:path');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'throws when a module cannot be loaded',
 	options: {
 		plugins: [
@@ -24,6 +24,6 @@ module.exports = {
 		hook: 'load',
 		message: `Could not load broken (imported by main.js): It's broken!`,
 		plugin: 'test',
-		watchFiles: [path.join(__dirname, 'main.js'), 'broken']
+		watchFiles: [path.join(__dirname, 'main.js')]
 	}
-};
+});

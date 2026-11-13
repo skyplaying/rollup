@@ -1,6 +1,6 @@
-const json = require('@rollup/plugin-json');
+const json = require('@rollup/plugin-json').default;
 
-module.exports = {
-	description: 'removes unusued json keys',
+module.exports = defineTest({
+	description: 'removes unused json keys',
 	options: { plugins: [json()] }
-};
+});

@@ -1,72 +1,110 @@
-import { version as rollupVersion } from 'package.json';
+import pkg from '../../package.json' with { type: 'json' };
 import Bundle from '../Bundle';
-import Graph from '../Graph';
-import { ensureArray } from '../utils/ensureArray';
-import { errAlreadyClosed, errCannotEmitFromOptionsHook, error } from '../utils/error';
-import { writeFile } from '../utils/fs';
+import Graph, { type RegisterWatchHooks } from '../Graph';
+import { catchUnfinishedHookActions } from '../utils/hookActions';
+import initWasm from '../utils/initWasm';
+import { getLogger } from '../utils/logger';
+import { LOGLEVEL_DEBUG, LOGLEVEL_INFO, LOGLEVEL_WARN } from '../utils/logging';
+import { getLogHandler } from '../utils/logHandler';
+import {
+	error,
+	getRollupError,
+	logAlreadyClosed,
+	logCannotEmitFromOptionsHook,
+	logErrorInHook,
+	logMissingFileOrDirOption,
+	logPluginError
+} from '../utils/logs';
 import { normalizeInputOptions } from '../utils/options/normalizeInputOptions';
 import { normalizeOutputOptions } from '../utils/options/normalizeOutputOptions';
-import { GenericConfigObject } from '../utils/options/options';
-import { basename, dirname, resolve } from '../utils/path';
-import { PluginDriver } from '../utils/PluginDriver';
-import { ANONYMOUS_OUTPUT_PLUGIN_PREFIX, ANONYMOUS_PLUGIN_PREFIX } from '../utils/pluginUtils';
-import { SOURCEMAPPING_URL } from '../utils/sourceMappingURL';
+import { getOnLog, normalizeLog, normalizePluginOption } from '../utils/options/options';
+import { dirname, resolve } from '../utils/path';
+import type { PluginDriver } from '../utils/PluginDriver';
+import { getSortedValidatedPlugins } from '../utils/PluginDriver';
+import { ANONYMOUS_OUTPUT_PLUGIN_PREFIX, ANONYMOUS_PLUGIN_PREFIX } from '../utils/pluginNames';
 import { getTimings, initialiseTimers, timeEnd, timeStart } from '../utils/timers';
-import {
+import type {
+	InputOptions,
 	NormalizedInputOptions,
 	NormalizedOutputOptions,
 	OutputAsset,
+	OutputBundle,
 	OutputChunk,
 	OutputOptions,
 	Plugin,
 	RollupBuild,
-	RollupOutput,
-	RollupWatcher
+	RollupOptions,
+	RollupOptionsFunction,
+	RollupOutput
 } from './types';
 
-export default function rollup(rawInputOptions: GenericConfigObject): Promise<RollupBuild> {
+const rollupVersion = pkg.version;
+
+// @ts-expect-error TS2540: the polyfill of `asyncDispose`.
+Symbol.asyncDispose ??= Symbol('Symbol.asyncDispose');
+
+export default function rollup(rawInputOptions: RollupOptions): Promise<RollupBuild> {
 	return rollupInternal(rawInputOptions, null);
 }
 
 export async function rollupInternal(
-	rawInputOptions: GenericConfigObject,
-	watcher: RollupWatcher | null
+	rawInputOptions: RollupOptions,
+	registerWatchHooks: RegisterWatchHooks | null
 ): Promise<RollupBuild> {
 	const { options: inputOptions, unsetOptions: unsetInputOptions } = await getInputOptions(
 		rawInputOptions,
-		watcher !== null
+		registerWatchHooks !== null
 	);
 	initialiseTimers(inputOptions);
 
-	const graph = new Graph(inputOptions, watcher);
+	await initWasm();
 
-	// remove the cache option from the memory after graph creation (cache is not used anymore)
+	const graph = new Graph(inputOptions, registerWatchHooks);
+
+	// remove the cache object from the memory after graph creation (cache is not used anymore)
 	const useCache = rawInputOptions.cache !== false;
-	delete inputOptions.cache;
-	delete rawInputOptions.cache;
+	if (rawInputOptions.cache) {
+		inputOptions.cache = undefined;
+		rawInputOptions.cache = undefined;
+	}
 
 	timeStart('BUILD', 1);
 
-	try {
-		await graph.pluginDriver.hookParallel('buildStart', [inputOptions]);
-		await graph.build();
-	} catch (err) {
-		const watchFiles = Object.keys(graph.watchFiles);
-		if (watchFiles.length > 0) {
-			err.watchFiles = watchFiles;
+	await catchUnfinishedHookActions(graph.pluginDriver, async () => {
+		try {
+			timeStart('initialize', 2);
+			await graph.pluginDriver.hookParallel('buildStart', [inputOptions]);
+			timeEnd('initialize', 2);
+			await graph.build();
+		} catch (error_: any) {
+			const watchFiles = Object.keys(graph.watchFiles);
+			if (watchFiles.length > 0) {
+				error_.watchFiles = watchFiles;
+			}
+			try {
+				await graph.pluginDriver.hookParallel('buildEnd', [error_]);
+			} catch (buildEndError: any) {
+				const compoundError = getRollupError(logErrorInHook(error_, buildEndError, 'buildEnd'));
+				await graph.pluginDriver.hookParallel('closeBundle', [compoundError]).catch(() => {});
+				throw compoundError;
+			}
+			await graph.pluginDriver.hookParallel('closeBundle', [error_]).catch(() => {});
+			throw error_;
 		}
-		await graph.pluginDriver.hookParallel('buildEnd', [err]);
-		await graph.pluginDriver.hookParallel('closeBundle', []);
-		throw err;
-	}
-
-	await graph.pluginDriver.hookParallel('buildEnd', []);
+		try {
+			await graph.pluginDriver.hookParallel('buildEnd', []);
+		} catch (buildEndError: any) {
+			await graph.pluginDriver.hookParallel('closeBundle', [buildEndError]).catch(() => {});
+			throw buildEndError;
+		}
+	});
 
 	timeEnd('BUILD', 1);
 
 	const result: RollupBuild = {
-		cache: useCache ? graph.getCache() : undefined,
-		closed: false,
+		get cache() {
+			return useCache ? graph.getCache() : undefined;
+		},
 		async close() {
 			if (result.closed) return;
 
@@ -74,28 +112,22 @@ export async function rollupInternal(
 
 			await graph.pluginDriver.hookParallel('closeBundle', []);
 		},
-		async generate(rawOutputOptions: OutputOptions) {
-			if (result.closed) return error(errAlreadyClosed());
-
-			return handleGenerateWrite(
-				false,
-				inputOptions,
-				unsetInputOptions,
-				rawOutputOptions as GenericConfigObject,
-				graph
-			);
+		closed: false,
+		async [Symbol.asyncDispose]() {
+			await this.close();
 		},
-		watchFiles: Object.keys(graph.watchFiles),
-		async write(rawOutputOptions: OutputOptions) {
-			if (result.closed) return error(errAlreadyClosed());
+		async generate(rawOutputOptions: OutputOptions) {
+			if (result.closed) return error(logAlreadyClosed());
 
-			return handleGenerateWrite(
-				true,
-				inputOptions,
-				unsetInputOptions,
-				rawOutputOptions as GenericConfigObject,
-				graph
-			);
+			return handleGenerateWrite(false, inputOptions, unsetInputOptions, rawOutputOptions, graph);
+		},
+		get watchFiles() {
+			return Object.keys(graph.watchFiles);
+		},
+		async write(rawOutputOptions: OutputOptions) {
+			if (result.closed) return error(logAlreadyClosed());
+
+			return handleGenerateWrite(true, inputOptions, unsetInputOptions, rawOutputOptions, graph);
 		}
 	};
 	if (inputOptions.perf) result.getTimings = getTimings;
@@ -103,43 +135,54 @@ export async function rollupInternal(
 }
 
 async function getInputOptions(
-	rawInputOptions: GenericConfigObject,
+	initialInputOptions: InputOptions,
 	watchMode: boolean
 ): Promise<{ options: NormalizedInputOptions; unsetOptions: Set<string> }> {
-	if (!rawInputOptions) {
+	if (!initialInputOptions) {
 		throw new Error('You must supply an options object to rollup');
 	}
-	const rawPlugins = ensureArray(rawInputOptions.plugins) as Plugin[];
-	const { options, unsetOptions } = normalizeInputOptions(
-		await rawPlugins.reduce(applyOptionHook(watchMode), Promise.resolve(rawInputOptions))
-	);
+	const processedInputOptions = await getProcessedInputOptions(initialInputOptions, watchMode);
+	const { options, unsetOptions } = await normalizeInputOptions(processedInputOptions, watchMode);
 	normalizePlugins(options.plugins, ANONYMOUS_PLUGIN_PREFIX);
 	return { options, unsetOptions };
 }
 
-function applyOptionHook(watchMode: boolean) {
-	return async (
-		inputOptions: Promise<GenericConfigObject>,
-		plugin: Plugin
-	): Promise<GenericConfigObject> => {
-		if (plugin.options) {
-			return (
-				((await plugin.options.call(
-					{ meta: { rollupVersion, watchMode } },
-					await inputOptions
-				)) as GenericConfigObject) || inputOptions
-			);
-		}
+async function getProcessedInputOptions(
+	inputOptions: InputOptions,
+	watchMode: boolean
+): Promise<InputOptions> {
+	const plugins = getSortedValidatedPlugins(
+		'options',
+		await normalizePluginOption(inputOptions.plugins)
+	);
+	const logLevel = inputOptions.logLevel || LOGLEVEL_INFO;
+	const logger = getLogger(plugins, getOnLog(inputOptions, logLevel), watchMode, logLevel);
 
-		return inputOptions;
-	};
+	for (const plugin of plugins) {
+		const { name, options } = plugin;
+		const handler = 'handler' in options! ? options.handler : options!;
+		const processedOptions = await handler.call(
+			{
+				debug: getLogHandler(LOGLEVEL_DEBUG, 'PLUGIN_LOG', logger, name, logLevel),
+				error: (error_): never =>
+					error(logPluginError(normalizeLog(error_), name, { hook: 'onLog' })),
+				info: getLogHandler(LOGLEVEL_INFO, 'PLUGIN_LOG', logger, name, logLevel),
+				meta: { rollupVersion, watchMode },
+				warn: getLogHandler(LOGLEVEL_WARN, 'PLUGIN_WARNING', logger, name, logLevel)
+			},
+			inputOptions
+		);
+		if (processedOptions) {
+			inputOptions = processedOptions;
+		}
+	}
+	return inputOptions;
 }
 
-function normalizePlugins(plugins: Plugin[], anonymousPrefix: string): void {
-	for (let pluginIndex = 0; pluginIndex < plugins.length; pluginIndex++) {
-		const plugin = plugins[pluginIndex];
+function normalizePlugins(plugins: readonly Plugin[], anonymousPrefix: string): void {
+	for (const [index, plugin] of plugins.entries()) {
 		if (!plugin.name) {
-			plugin.name = `${anonymousPrefix}${pluginIndex + 1}`;
+			plugin.name = `${anonymousPrefix}${index + 1}`;
 		}
 	}
 }
@@ -147,98 +190,103 @@ function normalizePlugins(plugins: Plugin[], anonymousPrefix: string): void {
 async function handleGenerateWrite(
 	isWrite: boolean,
 	inputOptions: NormalizedInputOptions,
-	unsetInputOptions: Set<string>,
-	rawOutputOptions: GenericConfigObject,
+	unsetInputOptions: ReadonlySet<string>,
+	rawOutputOptions: OutputOptions,
 	graph: Graph
 ): Promise<RollupOutput> {
 	const {
 		options: outputOptions,
 		outputPluginDriver,
 		unsetOptions
-	} = getOutputOptionsAndPluginDriver(
+	} = await getOutputOptionsAndPluginDriver(
 		rawOutputOptions,
 		graph.pluginDriver,
 		inputOptions,
 		unsetInputOptions
 	);
-	const bundle = new Bundle(outputOptions, unsetOptions, inputOptions, outputPluginDriver, graph);
-	const generated = await bundle.generate(isWrite);
-	if (isWrite) {
-		if (!outputOptions.dir && !outputOptions.file) {
-			return error({
-				code: 'MISSING_OPTION',
-				message: 'You must specify "output.file" or "output.dir" for the build.'
-			});
+	return catchUnfinishedHookActions(outputPluginDriver, async () => {
+		const bundle = new Bundle(outputOptions, unsetOptions, inputOptions, outputPluginDriver, graph);
+		const generated = await bundle.generate(isWrite);
+		if (isWrite) {
+			timeStart('WRITE', 1);
+			if (!outputOptions.dir && !outputOptions.file) {
+				return error(logMissingFileOrDirOption());
+			}
+			await Promise.all(
+				Object.values(generated).map(chunk =>
+					graph.fileOperationQueue.run(() => writeOutputFile(chunk, outputOptions, inputOptions))
+				)
+			);
+			await outputPluginDriver.hookParallel('writeBundle', [outputOptions, generated]);
+			timeEnd('WRITE', 1);
 		}
-		await Promise.all(
-			Object.keys(generated).map(chunkId => writeOutputFile(generated[chunkId], outputOptions))
-		);
-		await outputPluginDriver.hookParallel('writeBundle', [outputOptions, generated]);
-	}
-	return createOutput(generated);
+		return createOutput(generated);
+	});
 }
 
-function getOutputOptionsAndPluginDriver(
-	rawOutputOptions: GenericConfigObject,
+async function getOutputOptionsAndPluginDriver(
+	rawOutputOptions: OutputOptions,
 	inputPluginDriver: PluginDriver,
 	inputOptions: NormalizedInputOptions,
-	unsetInputOptions: Set<string>
-): {
+	unsetInputOptions: ReadonlySet<string>
+): Promise<{
 	options: NormalizedOutputOptions;
 	outputPluginDriver: PluginDriver;
 	unsetOptions: Set<string>;
-} {
+}> {
 	if (!rawOutputOptions) {
 		throw new Error('You must supply an options object');
 	}
-	const rawPlugins = ensureArray(rawOutputOptions.plugins) as Plugin[];
+	const rawPlugins = await normalizePluginOption(rawOutputOptions.plugins);
 	normalizePlugins(rawPlugins, ANONYMOUS_OUTPUT_PLUGIN_PREFIX);
 	const outputPluginDriver = inputPluginDriver.createOutputPluginDriver(rawPlugins);
 
 	return {
-		...getOutputOptions(inputOptions, unsetInputOptions, rawOutputOptions, outputPluginDriver),
+		...(await getOutputOptions(
+			inputOptions,
+			unsetInputOptions,
+			rawOutputOptions,
+			outputPluginDriver
+		)),
 		outputPluginDriver
 	};
 }
 
 function getOutputOptions(
 	inputOptions: NormalizedInputOptions,
-	unsetInputOptions: Set<string>,
-	rawOutputOptions: GenericConfigObject,
+	unsetInputOptions: ReadonlySet<string>,
+	rawOutputOptions: OutputOptions,
 	outputPluginDriver: PluginDriver
-): { options: NormalizedOutputOptions; unsetOptions: Set<string> } {
+): Promise<{ options: NormalizedOutputOptions; unsetOptions: Set<string> }> {
 	return normalizeOutputOptions(
 		outputPluginDriver.hookReduceArg0Sync(
 			'outputOptions',
-			[rawOutputOptions.output || rawOutputOptions] as [OutputOptions],
+			[rawOutputOptions],
 			(outputOptions, result) => result || outputOptions,
 			pluginContext => {
-				const emitError = () => pluginContext.error(errCannotEmitFromOptionsHook());
+				const emitError = () => pluginContext.error(logCannotEmitFromOptionsHook());
 				return {
 					...pluginContext,
 					emitFile: emitError,
 					setAssetSource: emitError
 				};
 			}
-		) as GenericConfigObject,
+		),
 		inputOptions,
 		unsetInputOptions
 	);
 }
 
-function createOutput(outputBundle: Record<string, OutputChunk | OutputAsset | {}>): RollupOutput {
+function createOutput(outputBundle: OutputBundle): RollupOutput {
 	return {
-		output: (Object.keys(outputBundle)
-			.map(fileName => outputBundle[fileName])
-			.filter(outputFile => Object.keys(outputFile).length > 0) as (
-			| OutputChunk
-			| OutputAsset
-		)[]).sort((outputFileA, outputFileB) => {
-			const fileTypeA = getSortingFileType(outputFileA);
-			const fileTypeB = getSortingFileType(outputFileB);
-			if (fileTypeA === fileTypeB) return 0;
-			return fileTypeA < fileTypeB ? -1 : 1;
-		}) as [OutputChunk, ...(OutputChunk | OutputAsset)[]]
+		output: (
+			Object.values(outputBundle).filter(outputFile => Object.keys(outputFile).length > 0) as (
+				OutputChunk | OutputAsset
+			)[]
+		).sort(
+			(outputFileA, outputFileB) =>
+				getSortingFileType(outputFileA) - getSortingFileType(outputFileB)
+		) as [OutputChunk, ...(OutputChunk | OutputAsset)[]]
 	};
 }
 
@@ -258,30 +306,27 @@ function getSortingFileType(file: OutputAsset | OutputChunk): SortingFileType {
 	return SortingFileType.SECONDARY_CHUNK;
 }
 
-function writeOutputFile(
+async function writeOutputFile(
 	outputFile: OutputAsset | OutputChunk,
-	outputOptions: NormalizedOutputOptions
+	outputOptions: NormalizedOutputOptions,
+	{ fs: { mkdir, writeFile } }: NormalizedInputOptions
 ): Promise<unknown> {
 	const fileName = resolve(outputOptions.dir || dirname(outputOptions.file!), outputFile.fileName);
-	let writeSourceMapPromise: Promise<void> | undefined;
-	let source: string | Uint8Array;
-	if (outputFile.type === 'asset') {
-		source = outputFile.source;
-	} else {
-		source = outputFile.code;
-		if (outputOptions.sourcemap && outputFile.map) {
-			let url: string;
-			if (outputOptions.sourcemap === 'inline') {
-				url = outputFile.map.toUrl();
-			} else {
-				url = `${basename(outputFile.fileName)}.map`;
-				writeSourceMapPromise = writeFile(`${fileName}.map`, outputFile.map.toString());
-			}
-			if (outputOptions.sourcemap !== 'hidden') {
-				source += `//# ${SOURCEMAPPING_URL}=${url}\n`;
-			}
-		}
-	}
 
-	return Promise.all([writeFile(fileName, source), writeSourceMapPromise]);
+	// 'recursive: true' does not throw if the folder structure, or parts of it, already exist
+	await mkdir(dirname(fileName), { recursive: true });
+
+	return writeFile(fileName, outputFile.type === 'asset' ? outputFile.source : outputFile.code);
+}
+
+/**
+ * Auxiliary function for defining rollup configuration
+ * Mainly to facilitate IDE code prompts, after all, export default does not
+ * prompt, even if you add @type annotations, it is not accurate
+ * @param options
+ */
+export function defineConfig<T extends RollupOptions | RollupOptions[] | RollupOptionsFunction>(
+	options: T
+): T {
+	return options;
 }

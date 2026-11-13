@@ -1,205 +1,340 @@
-import Module, { AstContext } from '../../Module';
-import { CallOptions } from '../CallOptions';
-import { DeoptimizableEntity } from '../DeoptimizableEntity';
-import { createInclusionContext, HasEffectsContext, InclusionContext } from '../ExecutionContext';
-import ExportDefaultDeclaration from '../nodes/ExportDefaultDeclaration';
-import Identifier from '../nodes/Identifier';
+import type { AstContext, default as Module } from '../../Module';
+import { EMPTY_ARRAY } from '../../utils/blank';
+import type { DeoptimizableEntity } from '../DeoptimizableEntity';
+import type { HasEffectsContext, InclusionContext } from '../ExecutionContext';
+import type { NodeInteraction, NodeInteractionCalled } from '../NodeInteractions';
+import {
+	INTERACTION_ACCESSED,
+	INTERACTION_ASSIGNED,
+	INTERACTION_CALLED
+} from '../NodeInteractions';
+import type ArrowFunctionExpression from '../nodes/ArrowFunctionExpression';
+import type ExportDefaultDeclaration from '../nodes/ExportDefaultDeclaration';
+import type FunctionExpression from '../nodes/FunctionExpression';
+import type Identifier from '../nodes/Identifier';
 import * as NodeType from '../nodes/NodeType';
-import { ExpressionEntity } from '../nodes/shared/Expression';
-import { ExpressionNode, Node } from '../nodes/shared/Node';
-import SpreadElement from '../nodes/SpreadElement';
-import { ObjectPath, PathTracker, UNKNOWN_PATH } from '../utils/PathTracker';
-import { LiteralValueOrUnknown, UnknownValue, UNKNOWN_EXPRESSION } from '../values';
+import {
+	deoptimizeInteraction,
+	type ExpressionEntity,
+	includeInteraction,
+	type LiteralValueOrUnknown,
+	UNKNOWN_EXPRESSION,
+	UNKNOWN_RETURN_EXPRESSION,
+	UnknownValue
+} from '../nodes/shared/Expression';
+import type FunctionBase from '../nodes/shared/FunctionBase';
+import type { Node } from '../nodes/shared/Node';
+import type { VariableKind } from '../nodes/shared/VariableKinds';
+import { isArrowFunctionExpressionNode, isFunctionExpressionNode } from '../utils/identifyNode';
+import { limitConcatenatedPathDepth, MAX_PATH_DEPTH } from '../utils/limitPathLength';
+import type { IncludedPathTracker } from '../utils/PathTracker';
+import {
+	type EntityPathTracker,
+	IncludedFullPathTracker,
+	type ObjectPath,
+	UNKNOWN_PATH,
+	UnknownKey
+} from '../utils/PathTracker';
 import Variable from './Variable';
 
-// To avoid infinite recursions
-const MAX_PATH_DEPTH = 7;
-
 export default class LocalVariable extends Variable {
-	additionalInitializers: ExpressionEntity[] | null = null;
 	calledFromTryStatement = false;
-	declarations: (Identifier | ExportDefaultDeclaration)[];
-	init: ExpressionEntity | null;
-	module: Module;
 
+	readonly declarations: (Identifier | ExportDefaultDeclaration)[];
+	readonly module: Module;
+
+	protected additionalInitializers: ExpressionEntity[] | null = null;
+	// A possibly incomplete list of functions assigned to this variable; only used
+	// to retain call arguments of assigned try-catch helpers, never for value queries
+	private assignedFunctions: (ArrowFunctionExpression | FunctionExpression)[] | null = null;
 	// Caching and deoptimization:
 	// We track deoptimization when we do not return something unknown
-	private deoptimizationTracker: PathTracker;
+	protected deoptimizationTracker: EntityPathTracker;
+	protected includedPathTracker: IncludedPathTracker = new IncludedFullPathTracker();
 	private expressionsToBeDeoptimized: DeoptimizableEntity[] = [];
 
 	constructor(
 		name: string,
 		declarator: Identifier | ExportDefaultDeclaration | null,
-		init: ExpressionEntity | null,
-		context: AstContext
+		public init: ExpressionEntity,
+		/** if this is non-empty, the actual init is this path of this.init */
+		protected initPath: ObjectPath,
+		context: AstContext,
+		readonly kind: VariableKind
 	) {
 		super(name);
 		this.declarations = declarator ? [declarator] : [];
-		this.init = init;
 		this.deoptimizationTracker = context.deoptimizationTracker;
 		this.module = context.module;
 	}
 
-	addDeclaration(identifier: Identifier, init: ExpressionEntity | null) {
+	addDeclaration(identifier: Identifier, init: ExpressionEntity): void {
 		this.declarations.push(identifier);
-		if (this.additionalInitializers === null) {
-			this.additionalInitializers = this.init === null ? [] : [this.init];
-			this.init = UNKNOWN_EXPRESSION;
-			this.isReassigned = true;
-		}
-		if (init !== null) {
-			this.additionalInitializers.push(init);
-		}
+		this.markInitializersForDeoptimization().push(init);
 	}
 
-	consolidateInitializers() {
-		if (this.additionalInitializers !== null) {
+	consolidateInitializers(): void {
+		if (this.additionalInitializers) {
 			for (const initializer of this.additionalInitializers) {
 				initializer.deoptimizePath(UNKNOWN_PATH);
 			}
-			this.additionalInitializers = null;
 		}
 	}
 
-	deoptimizePath(path: ObjectPath) {
-		if (path.length > MAX_PATH_DEPTH || this.isReassigned) return;
-		const trackedEntities = this.deoptimizationTracker.getEntities(path);
-		if (trackedEntities.has(this)) return;
-		trackedEntities.add(this);
-		if (path.length === 0) {
-			if (!this.isReassigned) {
-				this.isReassigned = true;
-				const expressionsToBeDeoptimized = this.expressionsToBeDeoptimized;
-				this.expressionsToBeDeoptimized = [];
-				for (const expression of expressionsToBeDeoptimized) {
-					expression.deoptimizeCache();
-				}
-				if (this.init) {
-					this.init.deoptimizePath(UNKNOWN_PATH);
-				}
-			}
-		} else if (this.init) {
-			this.init.deoptimizePath(path);
+	deoptimizeArgumentsOnInteractionAtPath(
+		interaction: NodeInteraction,
+		path: ObjectPath,
+		recursionTracker: EntityPathTracker
+	): void {
+		if (this.isReassigned || path.length + this.initPath.length > MAX_PATH_DEPTH) {
+			deoptimizeInteraction(interaction);
+			return;
 		}
+		recursionTracker.withTrackedEntityAtPath(
+			path,
+			this.init,
+			() => {
+				this.init.deoptimizeArgumentsOnInteractionAtPath(
+					interaction,
+					[...this.initPath, ...path],
+					recursionTracker
+				);
+			},
+			undefined
+		);
+	}
+
+	deoptimizePath(path: ObjectPath): void {
+		if (
+			this.isReassigned ||
+			this.deoptimizationTracker.trackEntityAtPathAndGetIfTracked(path, this)
+		) {
+			return;
+		}
+		if (path.length === 0) {
+			this.markReassigned();
+			const expressionsToBeDeoptimized = this.expressionsToBeDeoptimized;
+			this.expressionsToBeDeoptimized = EMPTY_ARRAY as unknown as DeoptimizableEntity[];
+			for (const expression of expressionsToBeDeoptimized) {
+				expression.deoptimizeCache();
+			}
+			this.init.deoptimizePath([...this.initPath, UnknownKey]);
+		} else {
+			this.init.deoptimizePath(limitConcatenatedPathDepth(this.initPath, path));
+		}
+	}
+
+	getKnownFunctionAtPath(
+		path: ObjectPath,
+		recursionTracker: EntityPathTracker,
+		origin: DeoptimizableEntity
+	): FunctionBase | null {
+		if (this.isReassigned || path.length + this.initPath.length > MAX_PATH_DEPTH) {
+			return null;
+		}
+		return recursionTracker.withTrackedEntityAtPath(
+			path,
+			this.init,
+			() => {
+				this.expressionsToBeDeoptimized.push(origin);
+				return this.init.getKnownFunctionAtPath(
+					[...this.initPath, ...path],
+					recursionTracker,
+					origin
+				);
+			},
+			null
+		);
 	}
 
 	getLiteralValueAtPath(
 		path: ObjectPath,
-		recursionTracker: PathTracker,
+		recursionTracker: EntityPathTracker,
 		origin: DeoptimizableEntity
 	): LiteralValueOrUnknown {
-		if (this.isReassigned || !this.init || path.length > MAX_PATH_DEPTH) {
+		if (this.isReassigned || path.length + this.initPath.length > MAX_PATH_DEPTH) {
 			return UnknownValue;
 		}
-		const trackedEntities = recursionTracker.getEntities(path);
-		if (trackedEntities.has(this.init)) {
-			return UnknownValue;
-		}
-		this.expressionsToBeDeoptimized.push(origin);
-		trackedEntities.add(this.init);
-		const value = this.init.getLiteralValueAtPath(path, recursionTracker, origin);
-		trackedEntities.delete(this.init);
-		return value;
+		return recursionTracker.withTrackedEntityAtPath(
+			path,
+			this.init,
+			() => {
+				this.expressionsToBeDeoptimized.push(origin);
+				return this.init.getLiteralValueAtPath(
+					[...this.initPath, ...path],
+					recursionTracker,
+					origin
+				);
+			},
+			UnknownValue
+		);
 	}
 
 	getReturnExpressionWhenCalledAtPath(
 		path: ObjectPath,
-		recursionTracker: PathTracker,
+		interaction: NodeInteractionCalled,
+		recursionTracker: EntityPathTracker,
 		origin: DeoptimizableEntity
-	): ExpressionEntity {
-		if (this.isReassigned || !this.init || path.length > MAX_PATH_DEPTH) {
-			return UNKNOWN_EXPRESSION;
+	): [expression: ExpressionEntity, isPure: boolean] {
+		if (this.isReassigned || path.length + this.initPath.length > MAX_PATH_DEPTH) {
+			return UNKNOWN_RETURN_EXPRESSION;
 		}
-		const trackedEntities = recursionTracker.getEntities(path);
-		if (trackedEntities.has(this.init)) {
-			return UNKNOWN_EXPRESSION;
-		}
-		this.expressionsToBeDeoptimized.push(origin);
-		trackedEntities.add(this.init);
-		const value = this.init.getReturnExpressionWhenCalledAtPath(path, recursionTracker, origin);
-		trackedEntities.delete(this.init);
-		return value;
+		return recursionTracker.withTrackedEntityAtPath(
+			path,
+			this.init,
+			() => {
+				this.expressionsToBeDeoptimized.push(origin);
+				return this.init.getReturnExpressionWhenCalledAtPath(
+					[...this.initPath, ...path],
+					interaction,
+					recursionTracker,
+					origin
+				);
+			},
+			UNKNOWN_RETURN_EXPRESSION
+		);
 	}
 
-	hasEffectsWhenAccessedAtPath(path: ObjectPath, context: HasEffectsContext) {
-		if (path.length === 0) return false;
-		if (this.isReassigned || path.length > MAX_PATH_DEPTH) return true;
-		const trackedExpressions = context.accessed.getEntities(path);
-		if (trackedExpressions.has(this)) return false;
-		trackedExpressions.add(this);
-		return (this.init && this.init.hasEffectsWhenAccessedAtPath(path, context))!;
-	}
-
-	hasEffectsWhenAssignedAtPath(path: ObjectPath, context: HasEffectsContext) {
-		if (this.included || path.length > MAX_PATH_DEPTH) return true;
-		if (path.length === 0) return false;
-		if (this.isReassigned) return true;
-		const trackedExpressions = context.assigned.getEntities(path);
-		if (trackedExpressions.has(this)) return false;
-		trackedExpressions.add(this);
-		return (this.init && this.init.hasEffectsWhenAssignedAtPath(path, context))!;
-	}
-
-	hasEffectsWhenCalledAtPath(
+	hasEffectsOnInteractionAtPath(
 		path: ObjectPath,
-		callOptions: CallOptions,
+		interaction: NodeInteraction,
 		context: HasEffectsContext
-	) {
-		if (path.length > MAX_PATH_DEPTH || this.isReassigned) return true;
-		const trackedExpressions = (callOptions.withNew
-			? context.instantiated
-			: context.called
-		).getEntities(path, callOptions);
-		if (trackedExpressions.has(this)) return false;
-		trackedExpressions.add(this);
-		return (this.init && this.init.hasEffectsWhenCalledAtPath(path, callOptions, context))!;
+	): boolean {
+		if (path.length + this.initPath.length > MAX_PATH_DEPTH) {
+			return true;
+		}
+		switch (interaction.type) {
+			case INTERACTION_ACCESSED: {
+				if (this.isReassigned) return true;
+				return (
+					!context.accessed.trackEntityAtPathAndGetIfTracked(path, this) &&
+					this.init.hasEffectsOnInteractionAtPath([...this.initPath, ...path], interaction, context)
+				);
+			}
+			case INTERACTION_ASSIGNED: {
+				if (this.included) return true;
+				if (path.length === 0) return false;
+				// if (this.isReassigned || this.init.included) return true;
+				if (this.isReassigned) return true;
+				return (
+					!context.assigned.trackEntityAtPathAndGetIfTracked(path, this) &&
+					this.init.hasEffectsOnInteractionAtPath([...this.initPath, ...path], interaction, context)
+				);
+			}
+			case INTERACTION_CALLED: {
+				if (this.isReassigned) return true;
+				return (
+					!(
+						interaction.withNew ? context.instantiated : context.called
+					).trackEntityAtPathAndGetIfTracked(path, interaction.args, this) &&
+					this.init.hasEffectsOnInteractionAtPath([...this.initPath, ...path], interaction, context)
+				);
+			}
+		}
 	}
 
-	include() {
-		if (!this.included) {
-			this.included = true;
+	includePath(path: ObjectPath, context: InclusionContext): void {
+		if (!this.includedPathTracker.includePathAndGetIfIncluded(path)) {
+			this.module.scope.context.requestTreeshakingPass();
+			if (!this.included) {
+				// This will reduce the number of tree-shaking passes by eagerly
+				// including inits. By pushing this here instead of directly including
+				// we avoid deep call stacks.
+				this.module.scope.context.newlyIncludedVariableInits.add(this.init);
+			}
+			super.includePath(path, context);
 			for (const declaration of this.declarations) {
 				// If node is a default export, it can save a tree-shaking run to include the full declaration now
-				if (!declaration.included) declaration.include(createInclusionContext(), false);
+				if (!declaration.included) declaration.include(context, false);
 				let node = declaration.parent as Node;
 				while (!node.included) {
 					// We do not want to properly include parents in case they are part of a dead branch
 					// in which case .include() might pull in more dead code
-					node.included = true;
+					node.includeNode(context);
 					if (node.type === NodeType.Program) break;
 					node = node.parent as Node;
 				}
 			}
-		}
-	}
-
-	includeCallArguments(context: InclusionContext, args: (ExpressionNode | SpreadElement)[]): void {
-		if (this.isReassigned || (this.init && context.includedCallArguments.has(this.init))) {
-			for (const arg of args) {
-				arg.include(context, false);
+			// We need to make sure we include the correct path of the init
+			if (path.length > 0) {
+				this.init.includePath(limitConcatenatedPathDepth(this.initPath, path), context);
+				this.additionalInitializers?.forEach(initializer =>
+					initializer.includePath(UNKNOWN_PATH, context)
+				);
 			}
-		} else if (this.init) {
-			context.includedCallArguments.add(this.init);
-			this.init.includeCallArguments(context, args);
-			context.includedCallArguments.delete(this.init);
 		}
 	}
 
-	markCalledFromTryStatement() {
+	includeCallArgumentsWhenCalledAtPath(
+		path: ObjectPath,
+		interaction: NodeInteractionCalled,
+		context: InclusionContext
+	): void {
+		if (this.isReassigned) {
+			// The value may still be one of the assigned functions, whose try-catch
+			// helpers need their call arguments retained
+			includeInteraction(interaction, context);
+			if (path.length === 0) {
+				this.includeCallArgumentsOfAssignedTryCatchHelpers(interaction, context);
+			}
+			return;
+		}
+		if (
+			context.includedCallArguments.has(this.init) ||
+			path.length + this.initPath.length > MAX_PATH_DEPTH
+		) {
+			includeInteraction(interaction, context);
+			return;
+		}
+		context.includedCallArguments.add(this.init);
+		this.init.includeCallArgumentsWhenCalledAtPath(
+			[...this.initPath, ...path],
+			interaction,
+			context
+		);
+		context.includedCallArguments.delete(this.init);
+	}
+
+	private includeCallArgumentsOfAssignedTryCatchHelpers(
+		interaction: NodeInteractionCalled,
+		context: InclusionContext
+	): void {
+		if (this.initPath.length === 0) {
+			this.includeCallArgumentsOfTryCatchHelper(this.init, interaction, context);
+		}
+		for (const assignedFunction of this.assignedFunctions ?? EMPTY_ARRAY) {
+			this.includeCallArgumentsOfTryCatchHelper(assignedFunction, interaction, context);
+		}
+	}
+
+	private includeCallArgumentsOfTryCatchHelper(
+		value: ExpressionEntity,
+		interaction: NodeInteractionCalled,
+		context: InclusionContext
+	): void {
+		if (isArrowFunctionExpressionNode(value) || isFunctionExpressionNode(value)) {
+			if (value.scope.hasParameterCalledFromTryStatement()) {
+				value.scope.includeCallArguments(interaction, context);
+			}
+		}
+	}
+
+	addReassignedValue(value: ExpressionEntity): void {
+		if (isArrowFunctionExpressionNode(value) || isFunctionExpressionNode(value)) {
+			(this.assignedFunctions ??= []).push(value);
+		}
+	}
+
+	markCalledFromTryStatement(): void {
 		this.calledFromTryStatement = true;
 	}
 
-	mayModifyThisWhenCalledAtPath(path: ObjectPath, recursionTracker: PathTracker) {
-		if (this.isReassigned || !this.init || path.length > MAX_PATH_DEPTH) {
-			return true;
+	markInitializersForDeoptimization(): ExpressionEntity[] {
+		if (this.additionalInitializers === null) {
+			this.additionalInitializers = [this.init];
+			this.init = UNKNOWN_EXPRESSION;
+			this.markReassigned();
 		}
-		const trackedEntities = recursionTracker.getEntities(path);
-		if (trackedEntities.has(this.init)) {
-			return true;
-		}
-		trackedEntities.add(this.init);
-		const result = this.init.mayModifyThisWhenCalledAtPath(path, recursionTracker);
-		trackedEntities.delete(this.init);
-		return result;
+		return this.additionalInitializers;
 	}
 }

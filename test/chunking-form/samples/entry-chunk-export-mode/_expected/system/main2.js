@@ -1,14 +1,14 @@
-System.register([], function (exports) {
+System.register([], (function (exports) {
   'use strict';
   return {
-    execute: function () {
+    execute: (function () {
 
-      exports('default', fn);
+      exports("default", fn);
 
       function fn () {
         console.log('main fn');
       }
 
-    }
+    })
   };
-});
+}));

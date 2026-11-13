@@ -1,6 +1,7 @@
-const assert = require('assert');
+const assert = require('node:assert');
+const Module = require('node:module');
 const rollup = require('../../dist/rollup');
-const { assertIncludes, loader } = require('../utils.js');
+const { loader } = require('../testHelpers.js');
 
 describe('misc', () => {
 	it('avoids modification of options or their properties', () => {
@@ -16,8 +17,6 @@ describe('misc', () => {
 						load: freeze(() => `export default 0;`)
 					}
 				]),
-				acornInjectPlugins: freeze([]),
-				acorn: freeze({}),
 				treeshake: freeze({})
 			})
 		);
@@ -49,7 +48,7 @@ describe('misc', () => {
 				assert.equal(relevantWarnings.length, 1);
 				assert.equal(
 					relevantWarnings[0].message,
-					`Creating a browser bundle that depends on Node.js built-in modules ("util"). You might need to include https://github.com/ionic-team/rollup-plugin-node-polyfills`
+					`Creating a browser bundle that depends on Node.js built-in modules ("util"). You might need to include https://github.com/FredKSchott/rollup-plugin-polyfill-node`
 				);
 			});
 	});
@@ -80,10 +79,11 @@ describe('misc', () => {
 				assert.deepEqual(warnings, [
 					{
 						code: 'MISSING_GLOBAL_NAME',
-						guess: '_',
+						id: 'lodash',
 						message:
-							"No name was provided for external module 'lodash' in output.globals – guessing '_'",
-						source: 'lodash'
+							'No name was provided for external module "lodash" in "output.globals" – guessing "_".',
+						names: ['_'],
+						url: 'https://rollupjs.org/configuration-options/#output-globals'
 					}
 				]);
 			});
@@ -110,9 +110,170 @@ describe('misc', () => {
 				assert.equal(warnings.length, 0);
 				assert.deepEqual(
 					output.map(({ fileName }) => fileName),
-					['main1.js', 'main2.js', 'dep-f8bec8a7.js', 'dyndep-b0a9ee12.js']
+					['main1.js', 'main2.js', 'dep-BED4JKkQ.js', 'dyndep-DOckMt73.js']
 				);
 			});
+	});
+
+	it('applies consistent hashes regardless of chunk transform order', async () => {
+		const FILES = {
+			main: `
+            import('folder1/dupe').then(({dupe}) => console.log(dupe));
+            import('folder2/dupe').then(({dupe}) => console.log(dupe));
+        `,
+			'folder1/dupe': `export const dupe = 'dupe content';`,
+			'folder2/dupe': `export const dupe = 'dupe content';`
+		};
+
+		async function buildBundle(delayedChunk) {
+			const bundle = await rollup.rollup({
+				input: 'main',
+				plugins: [
+					loader(FILES),
+					{
+						name: 'delay-chunk',
+						async renderChunk(_, chunk) {
+							if (chunk.facadeModuleId === delayedChunk) {
+								await new Promise(resolve => setTimeout(resolve, 100));
+							}
+							return null;
+						}
+					}
+				]
+			});
+			return bundle.generate({
+				format: 'es',
+				chunkFileNames: '[name]-[hash].js'
+			});
+		}
+
+		const { output: output1 } = await buildBundle('folder1/dupe');
+		const { output: output2 } = await buildBundle('folder2/dupe');
+
+		assert.strictEqual(
+			output1.length,
+			output2.length,
+			'Both outputs should have the same number of chunks'
+		);
+
+		const sortedOutput1 = output1.sort((a, b) => a.fileName.localeCompare(b.fileName));
+		const sortedOutput2 = output2.sort((a, b) => a.fileName.localeCompare(b.fileName));
+
+		for (let index = 0; index < sortedOutput1.length; index++) {
+			assert.strictEqual(
+				sortedOutput1[index].fileName,
+				sortedOutput2[index].fileName,
+				`Chunk ${index} should have the same filename in both outputs`
+			);
+			assert.strictEqual(
+				sortedOutput1[index].code,
+				sortedOutput2[index].code,
+				`Chunk ${index} should have the same code in both outputs`
+			);
+		}
+	});
+
+	it('produces consistent shared dependency chunk names regardless of the order in which chunks are emitted', async () => {
+		const FILES = {
+			'entry.js': "import 'mod-a.js'; import 'mod-b.js';",
+			'mod-a.js': 'export const x = 1;',
+			'mod-b.js': 'export const y = 2;',
+			'a-emit.js': "import { quz1 } from 'quz1.js'; export default 'foo' + quz1;",
+			'b-emit.js': "import { quz2 } from 'quz2.js'; export default 'bar' + quz2;",
+			'quz1.js': "export const quz1 = 'quz1';",
+			'quz2.js': "export const quz2 = 'quz2';"
+		};
+
+		const buildBundle = async (delayA, delayB) => {
+			const bundle = await rollup.rollup({
+				input: 'entry.js',
+				plugins: [
+					{
+						name: 'delayed-loader',
+						async resolveId(source) {
+							if (source === 'mod-a.js') {
+								await new Promise(resolve => setTimeout(resolve, delayA));
+								this.emitFile({ type: 'chunk', id: 'a-emit.js' });
+							}
+							if (source === 'mod-b.js') {
+								await new Promise(resolve => setTimeout(resolve, delayB));
+								this.emitFile({ type: 'chunk', id: 'b-emit.js' });
+							}
+							return source;
+						},
+						load(id) {
+							return FILES[id];
+						}
+					}
+				]
+			});
+
+			return bundle.generate({
+				chunkFileNames: '[name]-[hash].js',
+				format: 'es',
+				manualChunks(id) {
+					if (id.includes('quz')) return 'quz';
+				}
+			});
+		};
+		const { output: output1 } = await buildBundle(100, 50);
+		const { output: output2 } = await buildBundle(50, 100);
+
+		const getCode = output => Object.fromEntries(output.map(chunk => [chunk.fileName, chunk.code]));
+		assert.deepStrictEqual(getCode(output1), getCode(output2));
+	});
+
+	it('produces consistent mangled export names regardless of the order in which chunks are emitted (#5902)', async () => {
+		// 'alpha' and 'amid' both start with 'a', so one gets mangled name 'a' and the other 'b'.
+		// Without a deterministic sort, which one gets 'a' depends on emitFile call order,
+		// which in turn depends on which resolveId hook completes first.
+		const FILES = {
+			'entry.js': "import 'mod-a.js'; import 'mod-b.js';",
+			'mod-a.js': 'export const x = 1;',
+			'mod-b.js': 'export const y = 2;',
+			'a-emit.js':
+				"import { alpha, amid } from 'shared.js'; export default String(alpha) + String(amid);",
+			'b-emit.js':
+				"import { alpha, amid } from 'shared.js'; export default String(amid) + String(alpha);",
+			'shared.js': 'export const alpha = 1; export const amid = 2;'
+		};
+
+		const buildBundle = async (delayA, delayB) => {
+			const bundle = await rollup.rollup({
+				input: 'entry.js',
+				plugins: [
+					{
+						name: 'delayed-loader',
+						async resolveId(source) {
+							if (source === 'mod-a.js') {
+								await new Promise(resolve => setTimeout(resolve, delayA));
+								this.emitFile({ type: 'chunk', id: 'a-emit.js' });
+							}
+							if (source === 'mod-b.js') {
+								await new Promise(resolve => setTimeout(resolve, delayB));
+								this.emitFile({ type: 'chunk', id: 'b-emit.js' });
+							}
+							return source;
+						},
+						load(id) {
+							return FILES[id];
+						}
+					}
+				]
+			});
+
+			return bundle.generate({
+				chunkFileNames: '[name].js',
+				minifyInternalExports: true,
+				format: 'cjs'
+			});
+		};
+
+		const { output: output1 } = await buildBundle(100, 50);
+		const { output: output2 } = await buildBundle(50, 100);
+
+		const getCode = output => Object.fromEntries(output.map(chunk => [chunk.fileName, chunk.code]));
+		assert.deepStrictEqual(getCode(output1), getCode(output2));
 	});
 
 	it('ignores falsy plugins', () =>
@@ -121,8 +282,8 @@ describe('misc', () => {
 			plugins: [loader({ x: `console.log( 42 );` }), null, false, undefined]
 		}));
 
-	it('handles different import paths for different outputs', () => {
-		return rollup
+	it('handles different import paths for different outputs', () =>
+		rollup
 			.rollup({
 				input: 'x',
 				external: ['the-answer'],
@@ -150,7 +311,41 @@ describe('misc', () => {
 							assert.equal(generated.output[0].code, "import 'the-answer';\n", 'no render path 2')
 						)
 				])
-			);
+			));
+
+	it('does not leak chunk-prefixed render names from one output into another (#6296)', async () => {
+		const bundle = await rollup.rollup({
+			input: 'main',
+			plugins: [
+				loader({
+					main: `import { _ } from 'helper';\nconsole.log(_);`,
+					helper: `export function _(target, property) { return target[property]; }`
+				})
+			]
+		});
+
+		// Generating the chunked CJS first sets `renderBaseName` on the `_`
+		// variable to the chunk name (`vendor`). Without resetting render names
+		// at the start of each output, the subsequent UMD generate would emit
+		// `function vendor._(...)`, which is invalid JavaScript.
+		const cjs = await bundle.generate({
+			format: 'cjs',
+			dir: 'dist',
+			manualChunks: id => (id === 'helper' ? 'vendor' : undefined)
+		});
+		assert.ok(
+			cjs.output.some(chunk => chunk.fileName.startsWith('vendor')),
+			'CJS output should contain a vendor chunk'
+		);
+
+		const umd = await bundle.generate({ format: 'umd', name: 'main' });
+		const umdCode = umd.output[0].code;
+		assert.ok(
+			!/function\s+vendor\./.test(umdCode),
+			`UMD output should not contain a dotted function declaration:\n${umdCode}`
+		);
+		// And the function should still parse — eval the wrapper to verify.
+		assert.doesNotThrow(() => new Function(umdCode), 'UMD output should be valid JavaScript');
 	});
 
 	it('allows passing the same object to `rollup` and `generate`', () => {
@@ -175,7 +370,10 @@ describe('misc', () => {
 			.rollup(options)
 			.then(bundle => bundle.generate(options))
 			.then(output =>
-				assert.strictEqual(output.output[0].code, 'var input = 42;\n\nexport default input;\n')
+				assert.strictEqual(
+					output.output[0].code,
+					'var input = 42;\n\nexport { input as default };\n'
+				)
 			);
 	});
 
@@ -218,28 +416,208 @@ console.log(x);
 			input: {
 				'base/main': 'main.js',
 				'base/main/feature': 'feature.js',
-				'base/main/feature/sub': 'subfeature.js'
+				'base/main/feature/sub': 'subfeature.js',
+				'base/main/feature/sub/sub': 'subsubfeature.js'
 			},
 			plugins: [
 				loader({
 					'main.js': 'export function fn () { return "main"; } console.log(fn());',
 					'feature.js': 'import { fn } from "main.js"; console.log(fn() + " feature");',
-					'subfeature.js': 'import { fn } from "main.js"; console.log(fn() + " subfeature");'
+					'subfeature.js': 'import { fn } from "main.js"; console.log(fn() + " subfeature");',
+					'subsubfeature.js': 'import { fn } from "main.js"; console.log(fn() + " subsubfeature");'
 				})
 			]
 		});
 		const {
-			output: [main, feature, subfeature]
+			output: [feature, subfeature, subsubfeature, main]
 		} = await bundle.generate({
 			entryFileNames: `[name]`,
 			chunkFileNames: `[name]`,
 			format: 'es'
 		});
 		assert.strictEqual(main.fileName, 'base/main');
-		assert.ok(main.code.startsWith('function fn'));
 		assert.strictEqual(feature.fileName, 'base/main/feature');
 		assert.ok(feature.code.startsWith("import { fn } from '../main'"));
 		assert.strictEqual(subfeature.fileName, 'base/main/feature/sub');
 		assert.ok(subfeature.code.startsWith("import { fn } from '../../main'"));
+		assert.strictEqual(subsubfeature.fileName, 'base/main/feature/sub/sub');
+		assert.ok(subsubfeature.code.startsWith("import { fn } from '../../../main'"));
+	});
+
+	it('supports rendering es after rendering iife with inlined dynamic imports', async () => {
+		const bundle = await rollup.rollup({
+			input: 'main.js',
+			plugins: [
+				loader({
+					'main.js': "import('other.js');",
+					'other.js': "export const foo = 'bar';"
+				})
+			]
+		});
+		await bundle.generate({ format: 'iife', inlineDynamicImports: true });
+		await bundle.generate({ format: 'es', exports: 'auto' });
+	});
+
+	it('should support `Symbol.asyncDispose` of the rollup bundle and set closed state to true', async () => {
+		const bundle = await rollup.rollup({
+			input: 'main.js',
+			plugins: [
+				loader({
+					'main.js': "console.log('hello')"
+				})
+			]
+		});
+
+		await bundle[Symbol.asyncDispose]();
+		assert.strictEqual(bundle.closed, true);
+	});
+
+	it('preserves dynamic loader errors instead of reporting a missing dependency', () => {
+		const error = Object.assign(new Error('The native module has an incompatible architecture.'), {
+			code: 'ERR_DLOPEN_FAILED'
+		});
+
+		assert.throws(
+			() => loadNativeWithError('darwin', error),
+			receivedError => receivedError === error
+		);
+	});
+
+	it('preserves Windows application control policy errors', () => {
+		const error = Object.assign(new Error('An Application Control policy has blocked this file.'), {
+			code: 'ERR_DLOPEN_FAILED'
+		});
+
+		assert.throws(
+			() => loadNativeWithError('win32', error),
+			receivedError => receivedError === error
+		);
+	});
+
+	it('keeps the optional dependency guidance for missing native modules', () => {
+		const error = Object.assign(new Error('Cannot find module @rollup/rollup-linux-x64-gnu'), {
+			code: 'MODULE_NOT_FOUND'
+		});
+
+		assert.throws(
+			() => loadNativeWithError('linux', error),
+			receivedError => {
+				assert.strictEqual(receivedError.cause, error);
+				assert.match(receivedError.message, /npm has a bug related to optional dependencies/);
+				return true;
+			}
+		);
+	});
+
+	it('loads the android-x64 native package on x64 Android', () => {
+		const error = Object.assign(new Error('Cannot find module @rollup/rollup-android-x64'), {
+			code: 'MODULE_NOT_FOUND'
+		});
+
+		assert.throws(
+			() => loadNativeWithError('android', error),
+			receivedError => {
+				assert.strictEqual(receivedError.cause, error);
+				assert.match(receivedError.message, /^Cannot find module @rollup\/rollup-android-x64\./);
+				return true;
+			}
+		);
+	});
+
+	it('keeps the Visual C++ Redistributable guidance for missing Windows DLLs', () => {
+		const error = Object.assign(new Error('The specified module could not be found.'), {
+			code: 'ERR_DLOPEN_FAILED'
+		});
+
+		assert.throws(
+			() => loadNativeWithError('win32', error),
+			receivedError => {
+				assert.strictEqual(receivedError.cause, error);
+				assert.match(receivedError.message, /Microsoft Visual C\+\+ Redistributable/);
+				assert.match(receivedError.message, /vc_redist\.x64\.exe/);
+				return true;
+			}
+		);
+	});
+
+	it('sets process.report.excludeNetwork=true during getReport() and restores the original value (non-Windows)', () => {
+		// On Windows, getReport() runs inside a spawnSync child process and cannot
+		// be intercepted by mocking process.report.getReport in the current process.
+		if (process.platform === 'win32') return;
+		if (!('excludeNetwork' in process.report)) return;
+
+		const original = process.report.getReport.bind(process.report);
+		const snapshots = [];
+		process.report.getReport = () => {
+			snapshots.push(process.report.excludeNetwork);
+			return original();
+		};
+
+		try {
+			for (const initial of [false, true]) {
+				process.report.excludeNetwork = initial;
+				snapshots.length = 0;
+				delete require.cache[require.resolve('../../dist/native.js')];
+				try {
+					require('../../dist/native.js');
+				} catch {
+					/* ignore binary load errors */
+				}
+				assert.ok(snapshots.length > 0, 'getReport() should have been called');
+				assert.ok(
+					snapshots.every(v => v === true),
+					'excludeNetwork must be true during getReport()'
+				);
+				assert.strictEqual(
+					process.report.excludeNetwork,
+					initial,
+					'excludeNetwork must be restored afterwards'
+				);
+			}
+		} finally {
+			process.report.getReport = original;
+			process.report.excludeNetwork = false;
+			delete require.cache[require.resolve('../../dist/native.js')];
+		}
 	});
 });
+
+function loadNativeWithError(platform, error) {
+	const nativeEntry = require.resolve('../../dist/native.js');
+	const cachedNativeModule = require.cache[nativeEntry];
+	const originalLoad = Module._load;
+	delete require.cache[nativeEntry];
+	Module._load = function (id, parent, ...arguments_) {
+		if (parent?.filename === nativeEntry) {
+			switch (id) {
+				case 'node:fs': {
+					return { existsSync: () => false };
+				}
+				case 'node:process': {
+					return {
+						arch: 'x64',
+						platform,
+						report: { getReport: () => ({ header: { glibcVersionRuntime: '2.36' } }) }
+					};
+				}
+				case 'node:child_process': {
+					return { spawnSync: () => ({ status: 0, stdout: '{}' }) };
+				}
+				default: {
+					if (id.startsWith('@rollup/rollup-')) throw error;
+				}
+			}
+		}
+		return originalLoad.call(this, id, parent, ...arguments_);
+	};
+	try {
+		return require(nativeEntry);
+	} finally {
+		Module._load = originalLoad;
+		if (cachedNativeModule) {
+			require.cache[nativeEntry] = cachedNativeModule;
+		} else {
+			delete require.cache[nativeEntry];
+		}
+	}
+}

@@ -1,8 +1,8 @@
-const assert = require('assert');
-const path = require('path');
+const assert = require('node:assert');
+const path = require('node:path');
 const sideEffects = [];
 
-module.exports = {
+module.exports = defineTest({
 	description: 'supports setting module side effects to false for all modules',
 	context: {
 		require(id) {
@@ -19,22 +19,24 @@ module.exports = {
 		treeshake: {
 			moduleSideEffects: false
 		},
-		plugins: {
-			name: 'test-plugin',
-			resolveId(id) {
-				if (!path.isAbsolute(id)) {
-					const moduleSideEffects = JSON.parse(id.split('-')[1]);
-					if (moduleSideEffects) {
-						return { id, moduleSideEffects };
+		plugins: [
+			{
+				name: 'test-plugin',
+				resolveId(id) {
+					if (!path.isAbsolute(id)) {
+						const moduleSideEffects = JSON.parse(id.split('-')[1]);
+						if (moduleSideEffects) {
+							return { id, moduleSideEffects };
+						}
+						return id;
 					}
-					return id;
-				}
-			},
-			load(id) {
-				if (!path.isAbsolute(id)) {
-					return `export const value = '${id}'; sideEffects.push(value);`;
+				},
+				load(id) {
+					if (!path.isAbsolute(id)) {
+						return `export const value = '${id}'; sideEffects.push(value);`;
+					}
 				}
 			}
-		}
+		]
 	}
-};
+});

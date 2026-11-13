@@ -1,55 +1,56 @@
 const x = 'code';
-console.log('should remain impure');
+console.log('code0');
 
-console.log('should remain impure');
+console.log('code1'); 
 
-console.log('code');
-console.log('should remain impure');
+console.log('code2'); 
 
-console.log('code')/*@__PURE__*/;
-console.log('should remain impure');
-console.log('should remain impure');
+console.log('code3'); 
 
-console.log('code');
-console.log('should remain impure');
+console.log('code4'); 
 
-console.log('code'),
-console.log('should remain impure');
+console.log('code5'); 
 
-console.log('code')/*@__PURE__*/,
-console.log('should remain impure');
+console.log('code6');
 
-console.log('should remain impure');
+console.log('code7');
 
-console.log('code');
-console.log('should remain impure');
+console.log('code8');
 
-console.log('should remain impure');
+console.log('code9');
 
-console.log('should remain impure') ;
+console.log('code10'),
+console.log('code11');
 
-console.log('code');
-console.log('should remain impure', x);
+console.log('code12'),
+console.log('code13');
+
+console.log('code14');
+
+console.log('code15');
+console.log('code16');
+
+console.log('code17');
+
+console.log('code18') ;
+
+console.log('code19');
+console.log('code20', x);
 
 
 {
-	console.log('should remain impure');
+	console.log('code21');
 }
-keep1() /*@__PURE__*/ ; keep2();
+keep1()  ; keep2();
 keep3() ; 
-keep4() /*@__PURE__*/ ; /* other comment */ keep5();
-keep6() /*@__PURE__*/ ; // other comment
+keep4()  ; /* other comment */ keep5();
+keep6()  ; // other comment
 keep7();
-keep8() /*@__PURE__*/ && keep9();
+keep8()  && keep9();
 
-/*@__PURE__*/ Drop1(), // FIXME: unrelated issue
-Keep1() /*@__PURE__*/ , Keep2(),
+ Keep1()  , Keep2(),
 Keep3() , 
-Keep4() /*@__PURE__*/ , /* other comment */ Keep5(),
-Keep6() /*@__PURE__*/ , // other comment
+Keep4()  , /* other comment */ Keep5(),
+Keep6()  , // other comment
 Keep7(),
-Keep8() /*@__PURE__*/ && Keep9();
-
-// FIXME: unrelated issue
-/*@__PURE__*/ Drop10(),
-/*@__PURE__*/ Drop13();
+Keep8()  && Keep9();

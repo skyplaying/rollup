@@ -1,7 +1,7 @@
-System.register([], function () {
+System.register([], (function () {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
 			// effect
 			console.log( 'effect' );
@@ -12,9 +12,7 @@ System.register([], function () {
 			const foo = {
 				get effect () {
 					console.log( 'effect' );
-				},
-				get noEffect () {}
-			};
+				}};
 
 			// effect
 			(foo).effect;
@@ -25,17 +23,17 @@ System.register([], function () {
 			(null).foo = 1;
 
 			// effect
-			(true )();
-			(false )();
+			(true)();
+			(false)();
 			((() => console.log( 'effect' )))();
 			((() => console.log( 'effect' )))();
 
 			// effect
-			(true )()();
-			(false )()();
+			(true)()();
+			(false)()();
 			((() => () => console.log( 'effect' )))()();
 			((() => () => console.log( 'effect' )))()();
 
-		}
+		})
 	};
-});
+}));

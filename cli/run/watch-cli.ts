@@ -1,122 +1,117 @@
+import type { FSWatcher } from 'chokidar';
 import chokidar from 'chokidar';
-import { bold, cyan, green, underline } from 'colorette';
 import dateTime from 'date-time';
-import fs from 'fs';
+import { readFile } from 'node:fs/promises';
+import process from 'node:process';
 import ms from 'pretty-ms';
-import onExit from 'signal-exit';
+import { onExit } from 'signal-exit';
 import * as rollup from '../../src/node-entry';
-import { MergedRollupOptions, RollupWatcher } from '../../src/rollup/types';
+import type { MergedRollupOptions, RollupWatcher } from '../../src/rollup/types';
+import { bold, cyan, green, underline } from '../../src/utils/colors';
 import relativeId from '../../src/utils/relativeId';
 import { handleError, stderr } from '../logging';
-import { BatchWarnings } from './batchWarnings';
 import { getConfigPath } from './getConfigPath';
-import loadAndParseConfigFile from './loadConfigFile';
+import { loadConfigFile } from './loadConfigFile';
+import type { BatchWarnings } from './loadConfigFileType';
 import loadConfigFromCommand from './loadConfigFromCommand';
 import { getResetScreen } from './resetScreen';
 import { printTimings } from './timings';
+import { createWatchHooks } from './watchHooks';
 
-export async function watch(command: any) {
+export async function watch(command: Record<string, any>): Promise<void> {
 	process.env.ROLLUP_WATCH = 'true';
 	const isTTY = process.stderr.isTTY;
 	const silent = command.silent;
-	let configs: MergedRollupOptions[];
-	let warnings: BatchWarnings;
 	let watcher: RollupWatcher;
-	let configWatcher: fs.FSWatcher;
-	const configFile = command.config ? getConfigPath(command.config) : null;
+	let configWatcher: FSWatcher;
+	let resetScreen: (heading: string) => void;
+	const configFile = command.config ? await getConfigPath(command.config) : null;
+	const runWatchHook = createWatchHooks(command);
 
 	onExit(close);
-	process.on('uncaughtException' as any, close);
-	if (!process.stdin.isTTY) {
-		process.stdin.on('end', close);
-		process.stdin.resume();
-	}
+	process.on('uncaughtException', closeWithError);
 
-	if (configFile) {
-		let reloadingConfig = false;
-		let aborted = false;
+	async function loadConfigFromFileAndTrack(configFile: string): Promise<void> {
 		let configFileData: string | null = null;
+		let configFileRevision = 0;
 
-		configWatcher = chokidar.watch(configFile).on('change', () => reloadConfigFile());
+		configWatcher = chokidar.watch(configFile).on('change', reloadConfigFile);
 		await reloadConfigFile();
 
 		async function reloadConfigFile() {
 			try {
-				const newConfigFileData = fs.readFileSync(configFile!, 'utf-8');
+				const newConfigFileData = await readFile(configFile, 'utf8');
 				if (newConfigFileData === configFileData) {
 					return;
 				}
-				if (reloadingConfig) {
-					aborted = true;
-					return;
-				}
+				configFileRevision++;
+				const currentConfigFileRevision = configFileRevision;
 				if (configFileData) {
 					stderr(`\nReloading updated config...`);
 				}
 				configFileData = newConfigFileData;
-				reloadingConfig = true;
-				({ options: configs, warnings } = await loadAndParseConfigFile(configFile!, command));
-				reloadingConfig = false;
-				if (aborted) {
-					aborted = false;
-					reloadConfigFile();
-				} else {
-					if (watcher) {
-						watcher.close();
-					}
-					start(configs);
+				const { options, warnings } = await loadConfigFile(configFile, command, true);
+				if (currentConfigFileRevision !== configFileRevision) {
+					return;
 				}
-			} catch (err) {
-				configs = [];
-				reloadingConfig = false;
-				handleError(err, true);
+				if (watcher) {
+					await watcher.close();
+				}
+				start(options, warnings);
+			} catch (error: any) {
+				handleError(error, true);
 			}
 		}
-	} else {
-		({ options: configs, warnings } = await loadConfigFromCommand(command));
-		start(configs);
 	}
 
-	// tslint:disable-next-line:no-unnecessary-type-assertion
-	const resetScreen = getResetScreen(configs!, isTTY);
+	if (configFile) {
+		await loadConfigFromFileAndTrack(configFile);
+	} else {
+		const { options, warnings } = await loadConfigFromCommand(command, true);
+		await start(options, warnings);
+	}
 
-	function start(configs: MergedRollupOptions[]) {
-		try {
-			watcher = rollup.watch(configs as any);
-		} catch (err) {
-			return handleError(err);
-		}
+	async function start(configs: MergedRollupOptions[], warnings: BatchWarnings): Promise<void> {
+		watcher = rollup.watch(configs as any);
 
 		watcher.on('event', event => {
 			switch (event.code) {
-				case 'ERROR':
+				case 'ERROR': {
 					warnings.flush();
 					handleError(event.error, true);
+					runWatchHook('onError');
 					break;
+				}
 
-				case 'START':
+				case 'START': {
 					if (!silent) {
+						if (!resetScreen) {
+							resetScreen = getResetScreen(configs, isTTY);
+						}
 						resetScreen(underline(`rollup v${rollup.VERSION}`));
 					}
-					break;
+					runWatchHook('onStart');
 
-				case 'BUNDLE_START':
+					break;
+				}
+
+				case 'BUNDLE_START': {
 					if (!silent) {
 						let input = event.input;
 						if (typeof input !== 'string') {
 							input = Array.isArray(input)
 								? input.join(', ')
-								: Object.keys(input as Record<string, string>)
-										.map(key => (input as Record<string, string>)[key])
-										.join(', ');
+								: Object.values(input as Record<string, string>).join(', ');
 						}
 						stderr(
 							cyan(`bundles ${bold(input)} → ${bold(event.output.map(relativeId).join(', '))}...`)
 						);
 					}
+					runWatchHook('onBundleStart');
 					break;
+				}
 
-				case 'BUNDLE_END':
+				case 'BUNDLE_END': {
 					warnings.flush();
 					if (!silent)
 						stderr(
@@ -126,15 +121,19 @@ export async function watch(command: any) {
 								)}`
 							)
 						);
+					runWatchHook('onBundleEnd');
 					if (event.result && event.result.getTimings) {
 						printTimings(event.result.getTimings());
 					}
 					break;
+				}
 
-				case 'END':
-					if (!silent && isTTY) {
+				case 'END': {
+					runWatchHook('onEnd');
+					if (!silent) {
 						stderr(`\n[${dateTime()}] waiting for changes...`);
 					}
+				}
 			}
 
 			if ('result' in event && event.result) {
@@ -143,16 +142,32 @@ export async function watch(command: any) {
 		});
 	}
 
-	function close(code: number | null) {
-		process.removeListener('uncaughtException', close);
-		// removing a non-existent listener is a no-op
-		process.stdin.removeListener('end', close);
-
-		if (watcher) watcher.close();
+	function close(code: number | null | undefined): true {
+		process.removeListener('uncaughtException', closeWithError);
 		if (configWatcher) configWatcher.close();
-
-		if (code) {
-			process.exit(code);
-		}
+		Promise.resolve(watcher?.close())
+			.finally(() => {
+				// The numeric branch is only evaluated while the process is already exiting,
+				// after coverage tools have written their counters.
+				/* istanbul ignore next */
+				const exitCode = typeof code === 'number' ? code : 0;
+				process.exitCode = exitCode;
+				// Calling process.exit directly can deadlock while V8 background tasks are
+				// still running, see https://github.com/nodejs/node/issues/54918. Letting the
+				// process exit naturally avoids this, but plugins may keep handles open.
+				// The ".unref()" ensures this handler does not block exit
+				setTimeout(() => process.exit(exitCode), 200).unref();
+			})
+			.catch(error => handleError(error, true));
+		// Tell signal-exit that we are handling this gracefully
+		return true;
 	}
+
+	// return a promise that never resolves to keep the process running
+	return new Promise(() => {});
+}
+
+function closeWithError(error: Error): void {
+	error.name = `Uncaught ${error.name}`;
+	handleError(error);
 }

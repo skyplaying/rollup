@@ -1,7 +1,14 @@
-define(['./_virtual/other.js_commonjs-exports'], function (other) { 'use strict';
+define(['exports', './_virtual/other'], (function (exports, other) { 'use strict';
 
-	other.__exports.value = 43;
+	var hasRequiredOther;
 
-	return other.__exports;
+	function requireOther () {
+		if (hasRequiredOther) return other.__exports;
+		hasRequiredOther = 1;
+		other.__exports.value = 43;
+		return other.__exports;
+	}
 
-});
+	exports.__require = requireOther;
+
+}));

@@ -1,16 +1,16 @@
-const { assertIncludes } = require('../../../utils.js');
+const { assertIncludes } = require('../../../testHelpers.js');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'errors with plugin generated code frames also contain stack',
-	command: 'rollup -c',
+	spawnArgs: ['-c'],
 	error: () => true,
 	stderr: stderr => {
 		assertIncludes(
 			stderr,
 			'[!] (plugin at position 1) Error: My error.\n' +
-				'main.js\ncustom code frame\nError: My error.\n' +
-				'    at Object.transform'
+				'main.js\ncustom code frame\n' +
+				'    at Object.'
 		);
-		assertIncludes(stderr, 'rollup.config.js:11:17');
+		assertIncludes(stderr, 'rollup.config.js:9:19');
 	}
-};
+});

@@ -1,10 +1,11 @@
-const assert = require('assert');
+const assert = require('node:assert');
 
-const UNDERLINE = '\u001b[4m';
+const UNDERLINE = '\u001B[4m';
 
-module.exports = {
+module.exports = defineTest({
 	description: 'allows disabling clearing the screen',
-	command: 'node wrapper.js -cw',
+	spawnScript: 'wrapper.js',
+	spawnArgs: ['-cw'],
 	env: { FORCE_COLOR: '1', TERM: 'xterm' },
 	abortOnStderr(data) {
 		if (data.includes('waiting for changes')) {
@@ -13,5 +14,5 @@ module.exports = {
 	},
 	stderr(stderr) {
 		assert.strictEqual(stderr.slice(0, 10), `${UNDERLINE}rollup`);
-	},
-};
+	}
+});

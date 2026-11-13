@@ -1,7 +1,7 @@
-System.register('myBundle', [], function (exports) {
+System.register('myBundle', [], (function (exports) {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
 			function foo ( ok ) {
 				if ( !ok ) {
@@ -10,9 +10,10 @@ System.register('myBundle', [], function (exports) {
 			}
 
 			foo();
+			foo(true);
 
-			var main = exports('default', 42);
+			var main = exports("default", 42);
 
-		}
+		})
 	};
-});
+}));

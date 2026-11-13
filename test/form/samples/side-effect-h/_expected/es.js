@@ -5,7 +5,8 @@ function foo ( ok ) {
 }
 
 foo();
+foo(true);
 
 var main = 42;
 
-export default main;
+export { main as default };

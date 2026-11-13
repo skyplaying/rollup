@@ -1,21 +1,52 @@
-import { AstContext } from '../../Module';
-import Identifier from '../nodes/Identifier';
-import { ExpressionEntity } from '../nodes/shared/Expression';
-import { UNKNOWN_EXPRESSION } from '../values';
-import LocalVariable from '../variables/LocalVariable';
+import type { AstContext } from '../../Module';
+import { logRedeclarationError } from '../../utils/logs';
+import type Identifier from '../nodes/Identifier';
+import type { ExpressionEntity } from '../nodes/shared/Expression';
+import type { VariableKind } from '../nodes/shared/VariableKinds';
+import type { ObjectPath } from '../utils/PathTracker';
+import type LocalVariable from '../variables/LocalVariable';
 import ChildScope from './ChildScope';
 
 export default class BlockScope extends ChildScope {
+	constructor(parent: ChildScope) {
+		super(parent, parent.context);
+	}
+
 	addDeclaration(
 		identifier: Identifier,
 		context: AstContext,
-		init: ExpressionEntity | null,
-		isHoisted: boolean
+		init: ExpressionEntity,
+		destructuredInitPath: ObjectPath,
+		kind: VariableKind
 	): LocalVariable {
-		if (isHoisted) {
-			return this.parent.addDeclaration(identifier, context, UNKNOWN_EXPRESSION, isHoisted);
-		} else {
-			return super.addDeclaration(identifier, context, init, false);
+		if (kind === 'var') {
+			const name = identifier.name;
+			const existingVariable =
+				this.hoistedVariables?.get(name) || (this.variables.get(name) as LocalVariable | undefined);
+			if (existingVariable) {
+				if (existingVariable.kind === 'var') {
+					existingVariable.addDeclaration(identifier, init);
+					return existingVariable;
+				}
+				if (existingVariable.kind === 'parameter') {
+					return this.parent.addDeclaration(identifier, context, init, destructuredInitPath, kind);
+				}
+				return context.error(logRedeclarationError(name), identifier.start);
+			}
+			const declaredVariable = this.parent.addDeclaration(
+				identifier,
+				context,
+				init,
+				destructuredInitPath,
+				kind
+			);
+			// Necessary to make sure the init is deoptimized for conditional declarations.
+			// We cannot call deoptimizePath here.
+			declaredVariable.markInitializersForDeoptimization();
+			// We add the variable to this and all parent scopes to reliably detect conflicts
+			this.addHoistedVariable(name, declaredVariable);
+			return declaredVariable;
 		}
+		return super.addDeclaration(identifier, context, init, destructuredInitPath, kind);
 	}
 }

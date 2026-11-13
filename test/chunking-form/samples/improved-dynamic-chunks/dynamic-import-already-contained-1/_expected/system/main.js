@@ -1,7 +1,7 @@
-System.register([], function (exports) {
+System.register([], (function (exports) {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
 			Promise.resolve().then(function () { return main; }).then(console.log);
 			console.log('dep1');
@@ -18,13 +18,13 @@ System.register([], function (exports) {
 
 			Promise.resolve().then(function () { return main; }).then(console.log);
 			console.log('main', value1, value2);
-			const value = exports('value', 'main');
+			const value = exports("value", 'main');
 
 			var main = /*#__PURE__*/Object.freeze({
 				__proto__: null,
 				value: value
 			});
 
-		}
+		})
 	};
-});
+}));

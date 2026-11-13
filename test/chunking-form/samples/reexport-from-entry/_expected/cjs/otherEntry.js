@@ -1,10 +1,10 @@
 'use strict';
 
-Object.defineProperty(exports, '__esModule', { value: true });
+let a = {};
+let b = {};
 
-var otherEntry = require('./generated-otherEntry.js');
+let c = {};
 
-
-
-exports.b = otherEntry.b;
-exports.c = otherEntry.c;
+exports.a = a;
+exports.b = b;
+exports.c = c;

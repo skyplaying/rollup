@@ -1,12 +1,9 @@
 'use strict';
 
-require('./custom_modules/@my-scope/my-base-pkg/index.js');
-var index = require('./_virtual/index.js_commonjs-exports');
+var _commonjsHelpers = require('./_virtual/_commonjsHelpers.js');
+var underBuild$1 = require('./under-build2.js');
 
-const base = index.__exports;
-
-var underBuild = {
-	base
-};
+var underBuildExports = underBuild$1.__require();
+var underBuild = /*@__PURE__*/_commonjsHelpers.getDefaultExportFromCjs(underBuildExports);
 
 module.exports = underBuild;

@@ -1,9 +1,7 @@
-define(['exports'], function (exports) { 'use strict';
+define(['exports'], (function (exports) { 'use strict';
 
-	const foo = 'bar';
+	const main = 'bar';
 
-	exports.foo = foo;
+	exports.main = main;
 
-	Object.defineProperty(exports, '__esModule', { value: true });
-
-});
+}));

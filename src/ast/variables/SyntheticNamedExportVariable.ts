@@ -1,12 +1,14 @@
-import Module, { AstContext } from '../../Module';
-import { RESERVED_NAMES } from '../../utils/reservedNames';
+import type Module from '../../Module';
+import type { AstContext } from '../../Module';
+import type { InclusionContext } from '../ExecutionContext';
+import { type ObjectPath } from '../utils/PathTracker';
 import ExportDefaultVariable from './ExportDefaultVariable';
 import Variable from './Variable';
 
 export default class SyntheticNamedExportVariable extends Variable {
-	context: AstContext;
-	module: Module;
-	syntheticNamespace: Variable;
+	readonly context: AstContext;
+	readonly module: Module;
+	readonly syntheticNamespace: Variable;
 
 	private baseVariable: Variable | null = null;
 
@@ -40,25 +42,16 @@ export default class SyntheticNamedExportVariable extends Variable {
 		return this.syntheticNamespace.getBaseVariableName();
 	}
 
-	getName(): string {
-		const name = this.name;
-		return `${this.syntheticNamespace.getName()}${getPropertyAccess(name)}`;
+	getName(getPropertyAccess: (name: string) => string): string {
+		return `${this.syntheticNamespace.getName(getPropertyAccess)}${getPropertyAccess(this.name)}`;
 	}
 
-	include() {
-		if (!this.included) {
-			this.included = true;
-			this.context.includeVariableInModule(this.syntheticNamespace);
-		}
+	includePath(path: ObjectPath, context: InclusionContext): void {
+		super.includePath(path, context);
+		this.context.includeVariableInModule(this.syntheticNamespace, [this.name, ...path], context);
 	}
 
-	setRenderNames(baseName: string | null, name: string | null) {
+	setRenderNames(baseName: string | null, name: string | null): void {
 		super.setRenderNames(baseName, name);
 	}
 }
-
-const getPropertyAccess = (name: string) => {
-	return !RESERVED_NAMES[name] && /^(?!\d)[\w$]+$/.test(name)
-		? `.${name}`
-		: `[${JSON.stringify(name)}]`;
-};

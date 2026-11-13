@@ -1,20 +1,22 @@
-import MagicString from 'magic-string';
-import { Node, StatementNode } from '../ast/nodes/shared/Node';
-import Variable from '../ast/variables/Variable';
-import { InternalModuleFormat } from '../rollup/types';
-import { PluginDriver } from './PluginDriver';
+import type MagicString from 'magic-string';
+import type { Node, StatementNode } from '../ast/nodes/shared/Node';
+import type Variable from '../ast/variables/Variable';
+import type { ImportAttributesKey, InternalModuleFormat } from '../rollup/types';
+import type { GenerateCodeSnippets } from './generateCodeSnippets';
+import type { PluginDriver } from './PluginDriver';
 import { treeshakeNode } from './treeshakeNode';
 
 export interface RenderOptions {
-	compact: boolean;
-	dynamicImportFunction: string | undefined;
+	accessedDocumentCurrentScript: boolean;
 	exportNamesByVariable: Map<Variable, string[]>;
 	format: InternalModuleFormat;
 	freeze: boolean;
 	indent: string;
-	namespaceToStringTag: boolean;
-	outputPluginDriver: PluginDriver;
-	varOrConst: 'var' | 'const';
+	importAttributesKey: ImportAttributesKey;
+	pluginDriver: PluginDriver;
+	snippets: GenerateCodeSnippets;
+	symbols: boolean;
+	useOriginalName: ((variable: Variable) => boolean) | null;
 }
 
 export interface NodeRenderOptions {
@@ -22,17 +24,26 @@ export interface NodeRenderOptions {
 	isCalleeOfRenderedParent?: boolean;
 	isNoStatement?: boolean;
 	isShorthandProperty?: boolean;
+	jsxMode?: 'preserve' | 'classic' | 'automatic';
 	preventASI?: boolean;
-	renderedParentType?: string; // also serves as a flag if the rendered parent is different from the actual parent
-	renderedSurroundingElement?: string; // same as parent type, but for changed non-direct parents that directly preceed elements
+	/* Indicates if the direct parent of an element changed.
+	Necessary for determining the "this" context of callees. */
+	renderedParentType?: string;
+	/* Indicates if the parent or ancestor surrounding an element has changed and what it changed to.
+	Necessary for adding parentheses. */
+	renderedSurroundingElement?: string;
 	start?: number;
 }
 
 export const NO_SEMICOLON: NodeRenderOptions = { isNoStatement: true };
 
 // This assumes there are only white-space and comments between start and the string we are looking for
-export function findFirstOccurrenceOutsideComment(code: string, searchString: string, start = 0) {
-	let searchPos, charCodeAfterSlash;
+export function findFirstOccurrenceOutsideComment(
+	code: string,
+	searchString: string,
+	start = 0
+): number {
+	let searchPos: number, charCodeAfterSlash: number;
 	searchPos = code.indexOf(searchString, start);
 	while (true) {
 		start = code.indexOf('/', start);
@@ -53,27 +64,52 @@ export function findFirstOccurrenceOutsideComment(code: string, searchString: st
 
 const NON_WHITESPACE = /\S/g;
 
-export function findNonWhiteSpace(code: string, index: number) {
+export function findNonWhiteSpace(code: string, index: number): number {
 	NON_WHITESPACE.lastIndex = index;
 	const result = NON_WHITESPACE.exec(code)!;
 	return result.index;
 }
 
+const WHITESPACE = /\s/;
+
+export function findLastWhiteSpaceReverse(code: string, start: number, end: number): number {
+	while (true) {
+		if (start >= end) {
+			return end;
+		}
+		if (WHITESPACE.test(code[end - 1])) {
+			end--;
+		} else {
+			return end;
+		}
+	}
+}
+
+// A CRLF pair is one line break and must be removed as one. Removing only the
+// LF leaves the CR, which is still a line terminator, so ASI fires anyway and
+// the operand after a `return` or `throw` becomes dead code.
+function getLineBreakStart(code: string, lineBreakPos: number): number {
+	return lineBreakPos > 0 && code.charCodeAt(lineBreakPos - 1) === 13 /*"\r"*/
+		? lineBreakPos - 1
+		: lineBreakPos;
+}
+
 // This assumes "code" only contains white-space and comments
 // Returns position of line-comment if applicable
-function findFirstLineBreakOutsideComment(code: string): [number, number] {
+export function findFirstLineBreakOutsideComment(code: string): [number, number] {
 	let lineBreakPos,
 		charCodeAfterSlash,
 		start = 0;
 	lineBreakPos = code.indexOf('\n', start);
 	while (true) {
 		start = code.indexOf('/', start);
-		if (start === -1 || start > lineBreakPos) return [lineBreakPos, lineBreakPos + 1];
+		if (start === -1 || start > lineBreakPos)
+			return [getLineBreakStart(code, lineBreakPos), lineBreakPos + 1];
 
 		// With our assumption, '/' always starts a comment. Determine comment type:
 		charCodeAfterSlash = code.charCodeAt(start + 1);
 		if (charCodeAfterSlash === 47 /*"/"*/) return [start, lineBreakPos + 1];
-		start = code.indexOf('*/', start + 3) + 2;
+		start = code.indexOf('*/', start + 2) + 2;
 		if (start > lineBreakPos) {
 			lineBreakPos = code.indexOf('\n', start);
 		}
@@ -81,12 +117,12 @@ function findFirstLineBreakOutsideComment(code: string): [number, number] {
 }
 
 export function renderStatementList(
-	statements: StatementNode[],
+	statements: readonly StatementNode[],
 	code: MagicString,
 	start: number,
 	end: number,
 	options: RenderOptions
-) {
+): void {
 	let currentNode, currentNodeStart, currentNodeNeedsBoundaries, nextNodeStart;
 	let nextNode = statements[0];
 	let nextNodeNeedsBoundaries = !nextNode.included || nextNode.needsBoundaries;
@@ -109,12 +145,14 @@ export function renderStatementList(
 					code.original.slice(currentNode.end, nextNode === undefined ? end : nextNode.start)
 				)[1];
 			if (currentNode.included) {
-				currentNodeNeedsBoundaries
-					? currentNode.render(code, options, {
-							end: nextNodeStart,
-							start: currentNodeStart
-					  })
-					: currentNode.render(code, options);
+				if (currentNodeNeedsBoundaries) {
+					currentNode.render(code, options, {
+						end: nextNodeStart,
+						start: currentNodeStart
+					});
+				} else {
+					currentNode.render(code, options);
+				}
 			} else {
 				treeshakeNode(currentNode, code, currentNodeStart!, nextNodeStart);
 			}
@@ -126,7 +164,7 @@ export function renderStatementList(
 
 // This assumes that the first character is not part of the first node
 export function getCommaSeparatedNodesWithBoundaries<N extends Node>(
-	nodes: N[],
+	nodes: readonly N[],
 	code: MagicString,
 	start: number,
 	end: number
@@ -138,11 +176,10 @@ export function getCommaSeparatedNodesWithBoundaries<N extends Node>(
 	start: number;
 }[] {
 	const splitUpNodes = [];
-	let node, nextNode, nextNodeStart, contentEnd, char;
+	let node, nextNodeStart, contentEnd, char;
 	let separator = start - 1;
 
-	for (let nextIndex = 0; nextIndex < nodes.length; nextIndex++) {
-		nextNode = nodes[nextIndex];
+	for (const nextNode of nodes) {
 		if (node !== undefined) {
 			separator =
 				node.end +
@@ -180,7 +217,7 @@ export function getCommaSeparatedNodesWithBoundaries<N extends Node>(
 }
 
 // This assumes there are only white-space and comments between start and end
-export function removeLineBreaks(code: MagicString, start: number, end: number) {
+export function removeLineBreaks(code: MagicString, start: number, end: number): void {
 	while (true) {
 		const [removeStart, removeEnd] = findFirstLineBreakOutsideComment(
 			code.original.slice(start, end)

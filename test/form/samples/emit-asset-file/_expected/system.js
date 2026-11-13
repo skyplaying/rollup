@@ -1,9 +1,11 @@
-System.register([], function (exports, module) {
+System.register([], (function (exports, module) {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
-			var logo = new URL('assets/logo-25585ac1.svg', module.meta.url).href;
+			var logo = new URL('assets/logo-zDlmrXar.svg', module.meta.url).href;
+
+			var logoReverse = new URL('assets/logo_reverse\'-DbGK2oiS.svg', module.meta.url).href;
 
 			function showImage(url) {
 				console.log(url);
@@ -15,7 +17,8 @@ System.register([], function (exports, module) {
 			}
 
 			showImage(logo);
+			showImage(logoReverse);
 
-		}
+		})
 	};
-});
+}));

@@ -1,4 +1,4 @@
-define(function () { 'use strict';
+define((function () { 'use strict';
 
 	function isUsed ( x ) {
 		if ( x ) {
@@ -8,5 +8,6 @@ define(function () { 'use strict';
 	}
 
 	assert.equal( isUsed( true ), 2 );
+	assert.equal( isUsed( false ), 1 );
 
-});
+}));

@@ -1,22 +1,24 @@
-const path = require('path');
+const path = require('node:path');
+const ID_MAIN = path.join(__dirname, 'main.js');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'warns on unused imports ([#595])',
 	options: {
 		external: ['external']
 	},
 	context: {
-		require(id) {
+		require() {
 			return {};
 		}
 	},
 	warnings: [
 		{
 			code: 'UNUSED_EXTERNAL_IMPORT',
-			source: 'external',
-			names: ['notused', 'neverused'],
-			message: `"notused" and "neverused" are imported from external module "external" but never used in "main.js".`,
-			sources: [path.resolve(__dirname, './main.js')]
+			exporter: 'external',
+			ids: [ID_MAIN],
+			message:
+				'"notused" and "neverused" are imported from external module "external" but never used in "main.js".',
+			names: ['notused', 'neverused']
 		}
 	]
-};
+});

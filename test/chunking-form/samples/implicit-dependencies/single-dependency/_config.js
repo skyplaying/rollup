@@ -1,11 +1,11 @@
-const path = require('path');
-const assert = require('assert');
+const assert = require('node:assert');
+const path = require('node:path');
 
 const ID_MAIN = path.join(__dirname, 'main.js');
 const ID_LIB = path.join(__dirname, 'lib.js');
 const ID_DEP = path.join(__dirname, 'dep.js');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'supports implicit dependencies when emitting files',
 	options: {
 		preserveEntrySignatures: 'allow-extension',
@@ -20,6 +20,8 @@ module.exports = {
 			},
 			buildEnd() {
 				assert.deepStrictEqual(JSON.parse(JSON.stringify(this.getModuleInfo(ID_MAIN))), {
+					id: ID_MAIN,
+					attributes: {},
 					ast: {
 						type: 'Program',
 						start: 0,
@@ -29,6 +31,7 @@ module.exports = {
 								type: 'ImportDeclaration',
 								start: 0,
 								end: 30,
+								source: { type: 'Literal', start: 22, end: 29, raw: "'./lib'", value: './lib' },
 								specifiers: [
 									{
 										type: 'ImportSpecifier',
@@ -38,7 +41,7 @@ module.exports = {
 										local: { type: 'Identifier', start: 9, end: 14, name: 'value' }
 									}
 								],
-								source: { type: 'Literal', start: 22, end: 29, value: './lib', raw: "'./lib'" }
+								attributes: []
 							},
 							{
 								type: 'ExpressionStatement',
@@ -48,16 +51,16 @@ module.exports = {
 									type: 'CallExpression',
 									start: 31,
 									end: 49,
+									arguments: [{ type: 'Identifier', start: 43, end: 48, name: 'value' }],
 									callee: {
 										type: 'MemberExpression',
 										start: 31,
 										end: 42,
-										object: { type: 'Identifier', start: 31, end: 38, name: 'console' },
-										property: { type: 'Identifier', start: 39, end: 42, name: 'log' },
 										computed: false,
-										optional: false
+										object: { type: 'Identifier', start: 31, end: 38, name: 'console' },
+										optional: false,
+										property: { type: 'Identifier', start: 39, end: 42, name: 'log' }
 									},
-									arguments: [{ type: 'Identifier', start: 43, end: 48, name: 'value' }],
 									optional: false
 								}
 							}
@@ -65,20 +68,40 @@ module.exports = {
 						sourceType: 'module'
 					},
 					code: "import { value } from './lib';\nconsole.log(value);\n",
+					dynamicallyImportedIdResolutions: [],
 					dynamicallyImportedIds: [],
 					dynamicImporters: [],
-					hasModuleSideEffects: true,
-					id: ID_MAIN,
+					exportedBindings: {
+						'.': []
+					},
+					exports: [],
+					hasDefaultExport: false,
+					moduleSideEffects: true,
 					implicitlyLoadedAfterOneOf: [],
 					implicitlyLoadedBefore: [ID_DEP],
+					importedIdResolutions: [
+						{
+							attributes: {},
+							external: false,
+							id: ID_LIB,
+							meta: {},
+							moduleSideEffects: true,
+							resolvedBy: 'rollup',
+							syntheticNamedExports: false
+						}
+					],
 					importedIds: [ID_LIB],
 					importers: [],
 					isEntry: true,
 					isExternal: false,
+					isIncluded: true,
 					meta: {},
+					safeVariableNames: null,
 					syntheticNamedExports: false
 				});
 				assert.deepStrictEqual(JSON.parse(JSON.stringify(this.getModuleInfo(ID_DEP))), {
+					id: ID_DEP,
+					attributes: {},
 					ast: {
 						type: 'Program',
 						start: 0,
@@ -88,6 +111,7 @@ module.exports = {
 								type: 'ImportDeclaration',
 								start: 0,
 								end: 30,
+								source: { type: 'Literal', start: 22, end: 29, raw: "'./lib'", value: './lib' },
 								specifiers: [
 									{
 										type: 'ImportSpecifier',
@@ -97,7 +121,7 @@ module.exports = {
 										local: { type: 'Identifier', start: 9, end: 14, name: 'value' }
 									}
 								],
-								source: { type: 'Literal', start: 22, end: 29, value: './lib', raw: "'./lib'" }
+								attributes: []
 							},
 							{
 								type: 'ExpressionStatement',
@@ -107,16 +131,16 @@ module.exports = {
 									type: 'CallExpression',
 									start: 31,
 									end: 49,
+									arguments: [{ type: 'Identifier', start: 43, end: 48, name: 'value' }],
 									callee: {
 										type: 'MemberExpression',
 										start: 31,
 										end: 42,
-										object: { type: 'Identifier', start: 31, end: 38, name: 'console' },
-										property: { type: 'Identifier', start: 39, end: 42, name: 'log' },
 										computed: false,
-										optional: false
+										object: { type: 'Identifier', start: 31, end: 38, name: 'console' },
+										optional: false,
+										property: { type: 'Identifier', start: 39, end: 42, name: 'log' }
 									},
-									arguments: [{ type: 'Identifier', start: 43, end: 48, name: 'value' }],
 									optional: false
 								}
 							}
@@ -124,17 +148,35 @@ module.exports = {
 						sourceType: 'module'
 					},
 					code: "import { value } from './lib';\nconsole.log(value);\n",
+					dynamicallyImportedIdResolutions: [],
 					dynamicallyImportedIds: [],
 					dynamicImporters: [],
-					hasModuleSideEffects: true,
-					id: ID_DEP,
+					exportedBindings: {
+						'.': []
+					},
+					exports: [],
+					hasDefaultExport: false,
+					moduleSideEffects: true,
 					implicitlyLoadedAfterOneOf: [ID_MAIN],
 					implicitlyLoadedBefore: [],
+					importedIdResolutions: [
+						{
+							attributes: {},
+							external: false,
+							id: ID_LIB,
+							meta: {},
+							moduleSideEffects: true,
+							resolvedBy: 'rollup',
+							syntheticNamedExports: false
+						}
+					],
 					importedIds: [ID_LIB],
 					importers: [],
 					isEntry: false,
 					isExternal: false,
+					isIncluded: true,
 					meta: {},
+					safeVariableNames: null,
 					syntheticNamedExports: false
 				});
 			},
@@ -148,12 +190,12 @@ module.exports = {
 				assert.strictEqual(main.isEntry, true, 'main.isEntry');
 				assert.strictEqual(main.isDynamicEntry, false, 'main.isDynamicEntry');
 				assert.strictEqual(main.isImplicitEntry, false, 'main.isImplicitEntry');
-				const dep = bundle['generated-dep.js'];
-				assert.deepStrictEqual(dep.implicitlyLoadedBefore, [], 'dep.implicitlyLoadedBefore');
-				assert.strictEqual(dep.isEntry, false, 'dep.isEntry');
-				assert.strictEqual(dep.isDynamicEntry, false, 'dep.isDynamicEntry');
-				assert.strictEqual(dep.isImplicitEntry, true, 'dep.isImplicitEntry');
+				const dependency = bundle['generated-dep.js'];
+				assert.deepStrictEqual(dependency.implicitlyLoadedBefore, [], 'dep.implicitlyLoadedBefore');
+				assert.strictEqual(dependency.isEntry, false, 'dep.isEntry');
+				assert.strictEqual(dependency.isDynamicEntry, false, 'dep.isDynamicEntry');
+				assert.strictEqual(dependency.isImplicitEntry, true, 'dep.isImplicitEntry');
 			}
 		}
 	}
-};
+});

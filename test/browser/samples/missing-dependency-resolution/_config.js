@@ -1,16 +1,36 @@
-const { loader } = require('../../../utils.js');
+const { loader } = require('../../../testHelpers.js');
+const assert = require('node:assert/strict');
 
-module.exports = {
-	description: 'fails if a dependency cannot be resolved',
+const logs = [];
+
+module.exports = defineTest({
+	description: 'warns if a dependency cannot be resolved',
 	options: {
-		plugins: loader({
-			main: `import {foo} from 'dep';
+		onLog(level, log) {
+			logs.push({ level, log });
+		},
+		plugins: [
+			loader({
+				main: `import {foo} from 'dep';
 console.log(foo);`
-		})
-	},
-	error: {
-		message:
-			"Unexpected warnings (UNRESOLVED_IMPORT): 'dep' is imported by main, but could not be resolved – treating it as an external dependency\nIf you expect warnings, list their codes in config.expectedWarnings",
-		watchFiles: ['main']
+			}),
+			{
+				buildEnd() {
+					assert.deepEqual(logs, [
+						{
+							level: 'warn',
+							log: {
+								code: 'UNRESOLVED_IMPORT',
+								exporter: 'dep',
+								id: 'main',
+								message:
+									'"dep" is imported by "main", but could not be resolved – treating it as an external dependency.',
+								url: 'https://rollupjs.org/troubleshooting/#warning-treating-module-as-external-dependency'
+							}
+						}
+					]);
+				}
+			}
+		]
 	}
-};
+});

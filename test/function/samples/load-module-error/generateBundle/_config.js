@@ -1,5 +1,5 @@
-module.exports = {
-	description: 'buildStart hooks can use this.error',
+module.exports = defineTest({
+	description: 'generateBundle hooks can use this.error',
 	options: {
 		plugins: [
 			{
@@ -13,7 +13,7 @@ module.exports = {
 	generateError: {
 		code: 'PLUGIN_ERROR',
 		plugin: 'test',
-		message: 'nope',
+		message: '[plugin test] nope',
 		hook: 'generateBundle'
 	}
-};
+});

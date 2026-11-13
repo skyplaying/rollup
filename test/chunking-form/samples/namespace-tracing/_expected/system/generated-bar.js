@@ -1,14 +1,14 @@
-System.register([], function (exports) {
+System.register([], (function (exports) {
   'use strict';
   return {
-    execute: function () {
+    execute: (function () {
 
-      exports('b', bar);
+      exports("b", bar);
 
       function bar() {
         console.log('bar');
       }
 
-    }
+    })
   };
-});
+}));

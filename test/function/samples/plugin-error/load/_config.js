@@ -1,6 +1,6 @@
-const path = require('path');
+const path = require('node:path');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'buildStart hooks can use this.error',
 	options: {
 		plugins: [
@@ -15,8 +15,7 @@ module.exports = {
 	error: {
 		code: 'PLUGIN_ERROR',
 		plugin: 'test',
-		message: `Could not load ${path.join(__dirname, 'main.js')}: nope`,
-		hook: 'load',
-		watchFiles: [path.join(__dirname, 'main.js')]
+		message: `Could not load ${path.join(__dirname, 'main.js')}: [plugin test] nope`,
+		hook: 'load'
 	}
-};
+});

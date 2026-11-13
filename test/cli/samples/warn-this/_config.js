@@ -1,15 +1,15 @@
-const { assertIncludes } = require('../../../utils.js');
+const { assertIncludes } = require('../../../testHelpers.js');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'warns "this" is used on the top level',
-	command: 'rollup -c',
+	spawnArgs: ['-c'],
 	stderr: stderr =>
 		assertIncludes(
 			stderr,
-			'(!) `this` has been rewritten to `undefined`\n' +
-				'https://rollupjs.org/guide/en/#error-this-is-undefined\n' +
+			'(!) "this" has been rewritten to "undefined"\n' +
+				'https://rollupjs.org/troubleshooting/#error-this-is-undefined\n' +
 				'main.js\n' +
 				'1: console.log(this);\n' +
 				'               ^'
 		)
-};
+});

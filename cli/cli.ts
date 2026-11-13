@@ -1,6 +1,8 @@
+#!/usr/bin/env node
 import help from 'help.md';
-import { version } from 'package.json';
+import process from 'node:process';
 import argParser from 'yargs-parser';
+import package_ from '../package.json' with { type: 'json' };
 import { commandAliases } from '../src/utils/options/mergeOptions';
 import run from './run/index';
 
@@ -10,15 +12,19 @@ const command = argParser(process.argv.slice(2), {
 });
 
 if (command.help || (process.argv.length <= 2 && process.stdin.isTTY)) {
-	console.log(`\n${help.replace('__VERSION__', version)}\n`);
+	console.log(`\n${help}\n`);
 } else if (command.version) {
-	console.log(`rollup v${version}`);
+	console.log(`rollup v${package_.version}`);
 } else {
 	try {
+		// eslint-disable-next-line @typescript-eslint/no-require-imports
 		require('source-map-support').install();
-	} catch (err) {
+	} catch {
 		// do nothing
 	}
 
-	run(command);
+	const promise = run(command);
+	if (command.forceExit) {
+		promise.then(() => process.exit());
+	}
 }

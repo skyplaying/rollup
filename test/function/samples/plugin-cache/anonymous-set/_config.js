@@ -1,11 +1,13 @@
-module.exports = {
+module.exports = defineTest({
 	description: 'throws for anonymous plugins adding to the cache',
 	options: {
-		plugins: {
-			buildStart() {
-				this.cache.set('asdf', 'asdf');
+		plugins: [
+			{
+				buildStart() {
+					this.cache.set('asdf', 'asdf');
+				}
 			}
-		}
+		]
 	},
 	error: {
 		code: 'PLUGIN_ERROR',
@@ -15,4 +17,4 @@ module.exports = {
 		plugin: 'at position 1',
 		pluginCode: 'ANONYMOUS_PLUGIN_CACHE'
 	}
-};
+});

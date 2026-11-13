@@ -1,7 +1,7 @@
-System.register([], function () {
+System.register([], (function () {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
 			function getStringA() {
 				return 'A';
@@ -9,9 +9,9 @@ System.register([], function () {
 
 			console.log(getStringA());
 
-			console.log(false );
+			console.log(false);
 
-			console.log(true );
+			console.log(true);
 
 			function getStringD() {
 				return 'D';
@@ -19,6 +19,6 @@ System.register([], function () {
 
 			console.log(getStringD());
 
-		}
+		})
 	};
-});
+}));

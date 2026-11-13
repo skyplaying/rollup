@@ -1,3 +1,3 @@
-module.exports = {
-	description: 'properly remove coments above import statements'
-};
+module.exports = defineTest({
+	description: 'properly remove comments above import statements'
+});

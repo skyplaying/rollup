@@ -1,42 +1,116 @@
-import { HasEffectsContext } from '../ExecutionContext';
-import { EMPTY_PATH, ObjectPath, UnknownKey } from '../utils/PathTracker';
-import { UNKNOWN_EXPRESSION } from '../values';
-import Variable from '../variables/Variable';
-import * as NodeType from './NodeType';
-import { ExpressionEntity } from './shared/Expression';
-import { NodeBase } from './shared/Node';
-import { PatternNode } from './shared/Pattern';
+import type { HasEffectsContext, InclusionContext } from '../ExecutionContext';
+import type { NodeInteractionAssigned } from '../NodeInteractions';
+import { EMPTY_PATH, type ObjectPath, UnknownKey } from '../utils/PathTracker';
+import type LocalVariable from '../variables/LocalVariable';
+import type Variable from '../variables/Variable';
+import type * as NodeType from './NodeType';
+import { type ExpressionEntity } from './shared/Expression';
+import type { IncludeChildren } from './shared/Node';
+import { NodeBase, onlyIncludeSelf } from './shared/Node';
+import type { DeclarationPatternNode, PatternNode } from './shared/Pattern';
+import type { VariableKind } from './shared/VariableKinds';
 
-export default class RestElement extends NodeBase implements PatternNode {
-	argument!: PatternNode;
-	type!: NodeType.tRestElement;
-
+export default class RestElement extends NodeBase implements DeclarationPatternNode {
+	declare argument: PatternNode;
+	declare type: NodeType.tRestElement;
 	private declarationInit: ExpressionEntity | null = null;
 
 	addExportedVariables(
-		variables: Variable[],
-		exportNamesByVariable: Map<Variable, string[]>
+		variables: readonly Variable[],
+		exportNamesByVariable: ReadonlyMap<Variable, readonly string[]>
 	): void {
 		this.argument.addExportedVariables(variables, exportNamesByVariable);
 	}
 
-	bind() {
-		super.bind();
-		if (this.declarationInit !== null) {
-			this.declarationInit.deoptimizePath([UnknownKey, UnknownKey]);
+	declare(
+		kind: VariableKind,
+		destructuredInitPath: ObjectPath,
+		init: ExpressionEntity
+	): LocalVariable[] {
+		this.declarationInit = init;
+		return (this.argument as DeclarationPatternNode).declare(
+			kind,
+			getIncludedPatternPath(destructuredInitPath),
+			init
+		);
+	}
+
+	deoptimizeAssignment(destructuredInitPath: ObjectPath, init: ExpressionEntity): void {
+		this.argument.deoptimizeAssignment(getIncludedPatternPath(destructuredInitPath), init);
+	}
+
+	deoptimizePath(path: ObjectPath): void {
+		if (path.length === 0) {
+			this.argument.deoptimizePath(EMPTY_PATH);
 		}
 	}
 
-	declare(kind: string, init: ExpressionEntity) {
-		this.declarationInit = init;
-		return this.argument.declare(kind, UNKNOWN_EXPRESSION);
+	hasEffectsOnInteractionAtPath(
+		path: ObjectPath,
+		interaction: NodeInteractionAssigned,
+		context: HasEffectsContext
+	): boolean {
+		return (
+			path.length > 0 ||
+			this.argument.hasEffectsOnInteractionAtPath(EMPTY_PATH, interaction, context)
+		);
 	}
 
-	deoptimizePath(path: ObjectPath) {
-		path.length === 0 && this.argument.deoptimizePath(EMPTY_PATH);
+	hasEffectsWhenDestructuring(
+		context: HasEffectsContext,
+		destructuredInitPath: ObjectPath,
+		init: ExpressionEntity
+	): boolean {
+		return this.argument.hasEffectsWhenDestructuring(
+			context,
+			getIncludedPatternPath(destructuredInitPath),
+			init
+		);
 	}
 
-	hasEffectsWhenAssignedAtPath(path: ObjectPath, context: HasEffectsContext): boolean {
-		return path.length > 0 || this.argument.hasEffectsWhenAssignedAtPath(EMPTY_PATH, context);
+	includeDestructuredIfNecessary(
+		context: InclusionContext,
+		destructuredInitPath: ObjectPath,
+		init: ExpressionEntity
+	): boolean {
+		const included = this.argument.includeDestructuredIfNecessary(
+			context,
+			getIncludedPatternPath(destructuredInitPath),
+			init
+		);
+		if (!this.included && included) {
+			this.includeNode(context);
+		}
+		return this.included;
+	}
+
+	include(context: InclusionContext, includeChildrenRecursively: IncludeChildren) {
+		if (!this.included) this.includeNode(context);
+		// This should just include the identifier, its properties should be
+		// included where the variable is used.
+		this.argument.include(context, includeChildrenRecursively);
+	}
+
+	markDeclarationReached(): void {
+		(this.argument as DeclarationPatternNode).markDeclarationReached();
+	}
+
+	setAssignedValue(value: ExpressionEntity): void {
+		this.argument.setAssignedValue(value);
+	}
+
+	applyDeoptimizations() {
+		this.deoptimized = true;
+		if (this.declarationInit !== null) {
+			this.declarationInit.deoptimizePath([UnknownKey, UnknownKey]);
+			this.scope.context.requestTreeshakingPass();
+		}
 	}
 }
+
+RestElement.prototype.includeNode = onlyIncludeSelf;
+
+const getIncludedPatternPath = (destructuredInitPath: ObjectPath): ObjectPath =>
+	destructuredInitPath.at(-1) === UnknownKey
+		? destructuredInitPath
+		: [...destructuredInitPath, UnknownKey];

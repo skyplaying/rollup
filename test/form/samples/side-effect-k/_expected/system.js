@@ -1,9 +1,9 @@
-System.register('myBundle', [], function (exports) {
+System.register('myBundle', [], (function (exports) {
 	'use strict';
 	return {
-		execute: function () {
+		execute: (function () {
 
-			exports('default', x);
+			exports("default", x);
 
 			function augment ( x ) {
 				var prop, source;
@@ -28,6 +28,6 @@ System.register('myBundle', [], function (exports) {
 			function x () {}
 			augment( x.prototype );
 
-		}
+		})
 	};
-});
+}));

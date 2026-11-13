@@ -1,9 +1,10 @@
-const { assertIncludes } = require('../../../../utils.js');
+const { assertIncludes } = require('../../../../testHelpers.js');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'handles stdin errors',
-	command: `node wrapper.js`,
-	error(err) {
-		assertIncludes(err.message, 'Could not load -: Stream is broken.');
+	spawnScript: 'wrapper.js',
+	spawnArgs: [],
+	error(error) {
+		assertIncludes(error.message, 'Could not load -: Stream is broken.');
 	}
-};
+});

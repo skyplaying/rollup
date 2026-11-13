@@ -1,6 +1,6 @@
-const path = require('path');
+const path = require('node:path');
 
-module.exports = {
+module.exports = defineTest({
 	description: 'plugin transform hooks can use `this.warn({...}, char)` (#1140)',
 	options: {
 		plugins: [
@@ -20,7 +20,7 @@ module.exports = {
 			id: path.join(__dirname, 'main.js'),
 			hook: 'transform',
 			plugin: 'test',
-			message: 'foo',
+			message: '[plugin test] main.js: foo',
 			pluginCode: 'CODE'
 		},
 		{
@@ -28,7 +28,7 @@ module.exports = {
 			id: path.join(__dirname, 'main.js'),
 			plugin: 'test',
 			hook: 'transform',
-			message: 'bar',
+			message: '[plugin test] main.js (1:22): bar',
 			pos: 22,
 			loc: {
 				file: path.join(__dirname, 'main.js'),
@@ -41,4 +41,4 @@ module.exports = {
 			`
 		}
 	]
-};
+});

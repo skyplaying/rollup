@@ -12,8 +12,6 @@ const z = {
 z.a()();
 
 const v = {};
-
-v.toString().charCodeAt(0); // removed
 v.toString().doesNotExist(0); // retained
 
 const w = {
@@ -22,4 +20,4 @@ const w = {
 	})
 };
 
-w.toString().charCodeAt(0); // retained
+w.toString().charCodeAt(); // retained

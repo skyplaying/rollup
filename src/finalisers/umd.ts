@@ -1,26 +1,37 @@
-import { Bundle as MagicStringBundle } from 'magic-string';
-import { NormalizedOutputOptions } from '../rollup/types';
-import { error } from '../utils/error';
-import { FinaliserOptions } from './index';
+import type { Bundle as MagicStringBundle } from 'magic-string';
+import type { NormalizedOutputOptions } from '../rollup/types';
+import type { GenerateCodeSnippets } from '../utils/generateCodeSnippets';
+import { error, logMissingNameOptionForUmdExport } from '../utils/logs';
+import type { FinaliserOptions } from './index';
 import getCompleteAmdId from './shared/getCompleteAmdId';
 import { getExportBlock, getNamespaceMarkers } from './shared/getExportBlock';
 import getInteropBlock from './shared/getInteropBlock';
-import removeExtensionFromRelativeAmdId from './shared/removeExtensionFromRelativeAmdId';
-import { keypath, property } from './shared/sanitize';
+import { keypath } from './shared/sanitize';
 import { assignToDeepVariable } from './shared/setupNamespace';
+import throwOnPhase from './shared/throwOnPhase';
 import trimEmptyImports from './shared/trimEmptyImports';
+import updateExtensionForRelativeAmdId from './shared/updateExtensionForRelativeAmdId';
 import warnOnBuiltins from './shared/warnOnBuiltins';
 
-function globalProp(name: string, globalVar: string) {
+function globalProperty(
+	name: string | false | undefined,
+	globalVariable: string,
+	getPropertyAccess: (name: string) => string
+) {
 	if (!name) return 'null';
-	return `${globalVar}${keypath(name)}`;
+	return `${globalVariable}${keypath(name, getPropertyAccess)}`;
 }
 
-function safeAccess(name: string, globalVar: string, _: string) {
-	const parts = name.split('.');
-
-	let acc = globalVar;
-	return parts.map(part => (acc += property(part))).join(`${_}&&${_}`);
+function safeAccess(
+	name: string,
+	globalVariable: string,
+	{ _, getPropertyAccess }: GenerateCodeSnippets
+) {
+	let propertyPath = globalVariable;
+	return name
+		.split('.')
+		.map(part => (propertyPath += getPropertyAccess(part)))
+		.join(`${_}&&${_}`);
 }
 
 export default function umd(
@@ -29,14 +40,15 @@ export default function umd(
 		accessedGlobals,
 		dependencies,
 		exports,
+		hasDefaultExport,
 		hasExports,
 		id,
-		indentString: t,
+		indent: t,
 		intro,
 		namedExportsMode,
+		log,
 		outro,
-		varOrConst,
-		warn
+		snippets
 	}: FinaliserOptions,
 	{
 		amd,
@@ -47,55 +59,61 @@ export default function umd(
 		freeze,
 		interop,
 		name,
-		namespaceToStringTag,
+		generatedCode: { symbols },
 		globals,
 		noConflict,
+		reexportProtoFromExternal,
 		strict
 	}: NormalizedOutputOptions
-) {
-	const _ = compact ? '' : ' ';
-	const n = compact ? '' : '\n';
-	const s = compact ? '' : ';';
-	const factoryVar = compact ? 'f' : 'factory';
-	const globalVar = compact ? 'g' : 'global';
+): void {
+	const { _, cnst, getFunctionIntro, getNonArrowFunctionIntro, getPropertyAccess, n, s } = snippets;
+	const factoryVariable = compact ? 'f' : 'factory';
+	const globalVariable = compact ? 'g' : 'global';
 
 	if (hasExports && !name) {
-		return error({
-			code: 'MISSING_NAME_OPTION_FOR_IIFE_EXPORT',
-			message:
-				'You must supply "output.name" for UMD bundles that have exports so that the exports are accessible in environments without a module loader.'
-		});
+		return error(logMissingNameOptionForUmdExport());
 	}
 
-	warnOnBuiltins(warn, dependencies);
+	throwOnPhase('umd', id, dependencies);
+	warnOnBuiltins(log, dependencies);
 
-	const amdDeps = dependencies.map(m => `'${removeExtensionFromRelativeAmdId(m.id)}'`);
-	const cjsDeps = dependencies.map(m => `require('${m.id}')`);
+	const amdDependencies = dependencies.map(
+		m => `'${updateExtensionForRelativeAmdId(m.importPath, amd.forceJsExtensionForImports)}'`
+	);
+	const cjsDependencies = dependencies.map(m => `require('${m.importPath}')`);
 
 	const trimmedImports = trimEmptyImports(dependencies);
-	const globalDeps = trimmedImports.map(module => globalProp(module.globalName, globalVar));
-	const factoryArgs = trimmedImports.map(m => m.name);
+	const globalDependencies = trimmedImports.map(module =>
+		globalProperty(module.globalName, globalVariable, getPropertyAccess)
+	);
+	const factoryParameters = trimmedImports.map(m => m.name);
 
-	if (namedExportsMode && (hasExports || noConflict)) {
-		amdDeps.unshift(`'exports'`);
-		cjsDeps.unshift(`exports`);
-		globalDeps.unshift(
+	if (
+		(hasExports || noConflict) &&
+		(namedExportsMode || (hasExports && exports[0]?.local === 'exports.default'))
+	) {
+		amdDependencies.unshift(`'exports'`);
+		cjsDependencies.unshift(`exports`);
+		globalDependencies.unshift(
 			assignToDeepVariable(
 				name!,
-				globalVar,
+				globalVariable,
 				globals,
-				compact,
-				`${extend ? `${globalProp(name!, globalVar)}${_}||${_}` : ''}{}`
+				`${
+					extend ? `${globalProperty(name!, globalVariable, getPropertyAccess)}${_}||${_}` : ''
+				}{}`,
+				snippets,
+				log
 			)
 		);
 
-		factoryArgs.unshift('exports');
+		factoryParameters.unshift('exports');
 	}
 
 	const completeAmdId = getCompleteAmdId(amd, id);
-	const amdParams =
+	const amdParameters =
 		(completeAmdId ? `'${completeAmdId}',${_}` : ``) +
-		(amdDeps.length ? `[${amdDeps.join(`,${_}`)}],${_}` : ``);
+		(amdDependencies.length > 0 ? `[${amdDependencies.join(`,${_}`)}],${_}` : ``);
 
 	const define = amd.define;
 	const cjsExport = !namedExportsMode && hasExports ? `module.exports${_}=${_}` : ``;
@@ -104,74 +122,85 @@ export default function umd(
 	let iifeExport;
 
 	if (noConflict) {
-		const noConflictExportsVar = compact ? 'e' : 'exports';
+		const noConflictExportsVariable = compact ? 'e' : 'exports';
 		let factory;
 
 		if (!namedExportsMode && hasExports) {
-			factory = `var ${noConflictExportsVar}${_}=${_}${assignToDeepVariable(
+			factory = `${cnst} ${noConflictExportsVariable}${_}=${_}${assignToDeepVariable(
 				name!,
-				globalVar,
+				globalVariable,
 				globals,
-				compact,
-				`${factoryVar}(${globalDeps.join(`,${_}`)})`
+				`${factoryVariable}(${globalDependencies.join(`,${_}`)})`,
+				snippets,
+				log
 			)};`;
 		} else {
-			const module = globalDeps.shift();
+			const module = globalDependencies.shift();
 			factory =
-				`var ${noConflictExportsVar}${_}=${_}${module};${n}` +
-				`${t}${t}${factoryVar}(${[noConflictExportsVar].concat(globalDeps).join(`,${_}`)});`;
+				`${cnst} ${noConflictExportsVariable}${_}=${_}${module};${n}` +
+				`${t}${t}${factoryVariable}(${[noConflictExportsVariable, ...globalDependencies].join(`,${_}`)});`;
 		}
 		iifeExport =
-			`(function${_}()${_}{${n}` +
-			`${t}${t}var current${_}=${_}${safeAccess(name!, globalVar, _)};${n}` +
+			`(${getFunctionIntro([], { isAsync: false, name: null })}{${n}` +
+			`${t}${t}${cnst} current${_}=${_}${safeAccess(name!, globalVariable, snippets)};${n}` +
 			`${t}${t}${factory}${n}` +
-			`${t}${t}${noConflictExportsVar}.noConflict${_}=${_}function${_}()${_}{${_}` +
-			`${globalProp(name!, globalVar)}${_}=${_}current;${_}return ${noConflictExportsVar}${
-				compact ? '' : '; '
-			}};${n}` +
-			`${t}}())`;
+			`${t}${t}${noConflictExportsVariable}.noConflict${_}=${_}${getFunctionIntro([], {
+				isAsync: false,
+				name: null
+			})}{${_}` +
+			`${globalProperty(
+				name!,
+				globalVariable,
+				getPropertyAccess
+			)}${_}=${_}current;${_}return ${noConflictExportsVariable}${s}${_}};${n}` +
+			`${t}})()`;
 	} else {
-		iifeExport = `${factoryVar}(${globalDeps.join(`,${_}`)})`;
+		iifeExport = `${factoryVariable}(${globalDependencies.join(`,${_}`)})`;
 		if (!namedExportsMode && hasExports) {
-			iifeExport = assignToDeepVariable(name!, globalVar, globals, compact, iifeExport);
+			iifeExport = assignToDeepVariable(name!, globalVariable, globals, iifeExport, snippets, log);
 		}
 	}
 
-	const iifeNeedsGlobal = hasExports || (noConflict && namedExportsMode) || globalDeps.length > 0;
-	const globalParam = iifeNeedsGlobal ? `${globalVar},${_}` : '';
-	const globalArg = iifeNeedsGlobal ? `this,${_}` : '';
+	const iifeNeedsGlobal =
+		hasExports || (noConflict && namedExportsMode) || globalDependencies.length > 0;
+	const wrapperParameters: string[] = [factoryVariable];
+	if (iifeNeedsGlobal) {
+		wrapperParameters.unshift(globalVariable);
+	}
+	const globalArgument = iifeNeedsGlobal ? `this,${_}` : '';
 	const iifeStart = iifeNeedsGlobal
-		? `(${globalVar}${_}=${_}typeof globalThis${_}!==${_}'undefined'${_}?${_}globalThis${_}:${_}${globalVar}${_}||${_}self,${_}`
+		? `(${globalVariable}${_}=${_}typeof globalThis${_}!==${_}'undefined'${_}?${_}globalThis${_}:${_}${globalVariable}${_}||${_}self,${_}`
 		: '';
 	const iifeEnd = iifeNeedsGlobal ? ')' : '';
 	const cjsIntro = iifeNeedsGlobal
 		? `${t}typeof exports${_}===${_}'object'${_}&&${_}typeof module${_}!==${_}'undefined'${_}?` +
-		  `${_}${cjsExport}${factoryVar}(${cjsDeps.join(`,${_}`)})${_}:${n}`
+			`${_}${cjsExport}${factoryVariable}(${cjsDependencies.join(`,${_}`)})${_}:${n}`
 		: '';
 
-	// factory function should be wrapped by parentheses to avoid lazy parsing
 	const wrapperIntro =
-		`(function${_}(${globalParam}${factoryVar})${_}{${n}` +
+		`(${getNonArrowFunctionIntro(wrapperParameters, { isAsync: false, name: null })}{${n}` +
 		cjsIntro +
-		`${t}typeof ${define}${_}===${_}'function'${_}&&${_}${define}.amd${_}?${_}${define}(${amdParams}${factoryVar})${_}:${n}` +
+		`${t}typeof ${define}${_}===${_}'function'${_}&&${_}${define}.amd${_}?${_}${define}(${amdParameters}${factoryVariable})${_}:${n}` +
 		`${t}${iifeStart}${iifeExport}${iifeEnd};${n}` +
-		`}(${globalArg}(function${_}(${factoryArgs.join(', ')})${_}{${useStrict}${n}`;
+		// factory function should be wrapped by parentheses to avoid lazy parsing,
+		// cf. https://v8.dev/blog/preparser#pife
+		`})(${globalArgument}(${getNonArrowFunctionIntro(factoryParameters, {
+			isAsync: false,
+			name: null
+		})}{${useStrict}${n}`;
 
-	const wrapperOutro = n + n + '})));';
+	const wrapperOutro = n + n + '}));';
 
 	magicString.prepend(
 		`${intro}${getInteropBlock(
 			dependencies,
-			varOrConst,
 			interop,
 			externalLiveBindings,
 			freeze,
-			namespaceToStringTag,
+			symbols,
 			accessedGlobals,
-			_,
-			n,
-			s,
-			t
+			t,
+			snippets
 		)}`
 	);
 
@@ -180,20 +209,24 @@ export default function umd(
 		dependencies,
 		namedExportsMode,
 		interop,
-		compact,
+		snippets,
 		t,
-		externalLiveBindings
+		externalLiveBindings,
+		reexportProtoFromExternal
 	);
 	let namespaceMarkers = getNamespaceMarkers(
 		namedExportsMode && hasExports,
-		esModule,
-		namespaceToStringTag,
-		_,
-		n
+		esModule === true || (esModule === 'if-default-prop' && hasDefaultExport),
+		symbols,
+		snippets
 	);
 	if (namespaceMarkers) {
 		namespaceMarkers = n + n + namespaceMarkers;
 	}
-	magicString.append(`${exportBlock}${namespaceMarkers}${outro}`);
-	return magicString.trim().indent(t).append(wrapperOutro).prepend(wrapperIntro);
+	magicString
+		.append(`${exportBlock}${namespaceMarkers}${outro}`)
+		.trim()
+		.indent(t)
+		.append(wrapperOutro)
+		.prepend(wrapperIntro);
 }

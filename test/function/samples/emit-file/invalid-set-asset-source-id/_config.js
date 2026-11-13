@@ -1,12 +1,14 @@
-module.exports = {
+module.exports = defineTest({
 	description: 'throws for invalid asset ids',
 	options: {
-		plugins: {
-			name: 'test-plugin',
-			buildStart() {
-				this.setAssetSource('invalid', 'content');
+		plugins: [
+			{
+				name: 'test-plugin',
+				buildStart() {
+					this.setAssetSource('invalid', 'content');
+				}
 			}
-		}
+		]
 	},
 	error: {
 		code: 'PLUGIN_ERROR',
@@ -15,4 +17,4 @@ module.exports = {
 		plugin: 'test-plugin',
 		pluginCode: 'ASSET_NOT_FOUND'
 	}
-};
+});
